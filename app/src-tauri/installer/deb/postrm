@@ -1,0 +1,30 @@
+#!/bin/sh
+# The deb stand-in for NSIS_HOOK_POSTUNINSTALL — PLAN-0009 phase 4,
+# prescription 1.
+#
+# On Windows that hook deletes the app's two own per-user directories
+# after the files are gone. This script cannot mirror that deletion:
+# it runs as root, once, for a package installed system-wide, and the
+# directories it would delete sit under each user's home. Reaching
+# into user homes from a maintainer script is exactly the shape
+# constraint 5 forbids — RadialRig never deletes a byte outside what
+# this same process wrote — so nothing is deleted here.
+#
+# What this script can do is refuse to keep anything silently. On a
+# true removal it names what stays, once, on standard output, where
+# apt and dpkg show it. An upgrade says nothing, mirroring the
+# $UpdateMode guard around the NSIS hook.
+#
+# These two sentences are the one place the deb speaks with words of
+# its own: the app's binary is already gone when postrm runs, so it
+# cannot say them through strings.json the way the NSIS flow does.
+case "$1" in
+  remove|purge)
+    echo "The RadialRig app is removed. What its runs created stays:"
+    echo "each user's app data under ~/.config/com.radial47.radialrig"
+    echo "and ~/.local/share/com.radial47.radialrig, and the engine,"
+    echo "uv, and mounted projects, which the manage page's removal"
+    echo "section takes out in order."
+    ;;
+esac
+exit 0

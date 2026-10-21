@@ -1,0 +1,19 @@
+{
+  "uv_version": "0.12.5",
+  "uv_archives": {
+    "windows": {
+      "url_primary": "https://releases.astral.sh/github/uv/releases/download/<ver>/uv-x86_64-pc-windows-msvc.zip",
+      "url_fallback": "https://github.com/astral-sh/uv/releases/download/<ver>/uv-x86_64-pc-windows-msvc.zip",
+      "sha256": "4c4d49d8738847d9b71ba319e49a5688c93eac0fe6204b1df24e98528dddf39a"
+    },
+    "linux": {
+      "url_primary": "https://releases.astral.sh/github/uv/releases/download/<ver>/uv-x86_64-unknown-linux-gnu.tar.gz",
+      "url_fallback": "https://github.com/astral-sh/uv/releases/download/<ver>/uv-x86_64-unknown-linux-gnu.tar.gz",
+      "sha256": "68a509da24b06b4223a1c0175fb5eb5bc79342b76cbeff0cfe51ac3f5b17b6b2"
+    }
+  },
+  "package_source": "radialrig @ https://github.com/thejug923/radialrig/releases/download/v0.1.19/radialrig-0.1.19-py3-none-any.whl",
+  "package_sha256": "2c129386bc2ffb4f9e2d5b7a629b0a3cedddf2a4fee27a0a1dc22b3978ac6692",
+  "python_pin": "3.13",
+  "engine_min_version": "0.1.19"
+}

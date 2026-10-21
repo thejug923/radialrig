@@ -1,0 +1,84 @@
+{
+  "_comment": "Every sentence the desktop shell says before the engine serves a page. The shell reads it with serde_json, the bootstrap page reads it with fetch, and the pytest hold reads it with json.loads, so the three cannot drift. A failure sentence carries two lines: what the shell says, and what more there is to say under it. The page draws the first as the saying and the rest as the detail; a line whose slot has nothing to fill is not drawn at all.",
+  "window_title": "RadialRig",
+  "endorsement": "A Radial 47 product",
+  "gate_head": "Install RadialRig",
+  "gate_lede": "This sets up RadialRig, the document manager for your agents' projects, along with the tools it runs on.",
+  "gate_programs": {
+    "label": "Programs",
+    "path": {
+      "windows": "%USERPROFILE%\\.local\\bin",
+      "linux": "~/.local/bin"
+    }
+  },
+  "gate_support": {
+    "label": "Support files",
+    "path": {
+      "windows": "%APPDATA%\\uv",
+      "linux": "~/.local/share/uv"
+    }
+  },
+  "gate_reassure": "You can take all of it back out from this app later. RadialRig never touches your own files.",
+  "gate_press_note": "Nothing runs until this press.",
+  "consent_label": "Install RadialRig",
+  "step_running": "Step {detail} of 9",
+  "step_stopped": "Stopped at step {detail} of 9",
+  "progress_probe": "Checking the version of the uv already on this machine.",
+  "progress_download": "Downloading the pinned uv archive.",
+  "progress_verify": "Checking those bytes against the pinned checksum.",
+  "progress_extract": {
+    "windows": "Writing uv.exe and uvx.exe into your user folder.",
+    "linux": "Writing uv and uvx into your user folder."
+  },
+  "progress_path": {
+    "windows": "Putting that folder on your user Path.",
+    "linux": "Reading whether that folder is on your PATH."
+  },
+  "progress_install": "Installing the RadialRig engine with uv.",
+  "progress_resolve": "Finding the radialrig command that uv installed.",
+  "progress_version": "Reading the version of the installed engine.",
+  "progress_start": "Starting the engine and waiting for its address.",
+  "fail_uv_probe": "The uv already on this machine did not answer a version check, so nothing was installed with it.\nThe error was “{detail}”.",
+  "fail_download": "The uv archive did not download.\nThe error was “{detail}”.",
+  "fail_checksum": "The downloaded uv archive does not match the checksum this app carries.\nTrying again downloads the same bytes and fails the same way. A newer RadialRig release carries a corrected checksum; updating this app is what changes this.",
+  "fail_extract": "The archive arrived and matched its checksum, but uv could not be written into your user folder.\nThe error was “{detail}”.",
+  "fail_path_write": "Your user Path was not changed.\nCommands typed into a terminal would not find uv or radialrig yet. Nothing after this step has run.",
+  "fail_package_download": "RadialRig could not get the engine package.\nThe error was “{detail}”.",
+  "fail_package_checksum": "The engine package does not match the checksum this app carries.\nTrying again downloads the same bytes and fails the same way. A newer RadialRig release carries a corrected checksum; updating this app is what changes this.",
+  "fail_engine_install": "uv could not install the engine.\nThe error was “{detail}”.",
+  "fail_recovery": "Taking the engine out and installing it again from a clean state did not work.\nThe error was “{detail}”.",
+  "fail_tool_dir": "This app could not find the engine's folders, or the engine was not where it should be after the install.\nThe error was “{detail}”.",
+  "fail_foreign_exe": {
+    "windows": "A radialrig.exe this app did not install is already at {detail}.\nNothing was changed and nothing was overwritten. Moving that file elsewhere, or taking it out, is what changes this.",
+    "linux": "A radialrig command this app did not install is already at {detail}.\nNothing was changed and nothing was overwritten. Moving that file elsewhere, or taking it out, is what changes this."
+  },
+  "fail_engine_old": "The engine on this machine is older than this app needs.\nThis machine has engine {detail}, and this app needs {needed} or newer. Press Run This Step Again and this app replaces it; programs that use RadialRig lose it for a moment and may need to reconnect.",
+  "fail_engine_unread": "The engine on this machine is older than this app needs.\nThe engine on this machine did not say which version it is, and this app needs {needed} or newer. Press Run This Step Again and this app replaces it; programs that use RadialRig lose it for a moment and may need to reconnect.",
+  "fail_spawn": "The engine command did not start.\nThe error was “{detail}”.",
+  "fail_line_timeout": "The engine started but never printed its address within thirty seconds, so this window has nowhere to go.\nThe error was “{detail}”.",
+  "fail_line_unparsed": "The engine printed an address line this app cannot read, so this window did not follow it.\nThe error was “{detail}”.",
+  "fail_engine_stopped": "The engine stopped while this window was open.\nThe error was “{detail}”.",
+  "fail_picker_no_target": "This view has no field for a project folder. The folder you picked, ready to copy: {detail}",
+  "fail_debug_override": "This is a debug build, and it is pointed at an overridden package source: {detail}",
+  "path_report_on": "The PATH this app started with carries the programs folder {detail}. This app read that and changed nothing.",
+  "path_report_off": "The PATH this app started with does not carry the programs folder {detail}. This app read that and changed nothing.",
+  "swap_running": "Replacing the engine with the version this app needs.\nPrograms that use RadialRig lose it for a moment and may need to reconnect. Keep this window open until it finishes.",
+  "swap_held": "These programs are still running from the engine's folders: {detail}.",
+  "swap_held_none": "No program was found running from the engine's folders, so some other program may have a file open there.",
+  "update_ready": "RadialRig {detail} is ready. This is RadialRig {current}.\nUpdating closes RadialRig, installs the new version and opens it again.",
+  "update_now": "Update now",
+  "update_later": "Later",
+  "update_failed_download": "The update was not installed, and nothing changed.\nThe new version did not download. This computer may be offline, or the release page did not answer.",
+  "update_failed_signature": "The update was not installed, and nothing changed.\nThe download did not carry the signature every RadialRig release carries, so this app did not trust it.",
+  "update_failed_version": "The update was not installed, and nothing changed.\nThe download was signed for a different version than the one on offer, so this app did not trust it.",
+  "update_failed_install": "The update was not installed, and nothing changed.\nThe new version arrived with its signature, but it could not be put in place.",
+  "uninstall_notice": "This removal takes out RadialRig and the files it wrote. The engine, uv, the Python uv installed for it, your projects and your client entries stay where they are. Run {detail} manage and open its removal page to take those out, in the order that page names.",
+  "uninstall_path_removed": "The one entry this app put on your user Path is out. The rest of your Path value is exactly as it was.",
+  "uninstall_path_kept": "Your user Path still carries the entry this app added, and this removal left it alone. The value on this machine no longer matches what the app recorded, so taking the entry out could take someone else's edit with it. The entry is {detail}, under the registry key HKCU\\Environment.",
+  "uninstall_path_gone": "The entry this app recorded is not on your user Path now, so this removal wrote nothing to it.",
+  "uninstall_path_absent": "No record of a Path change exists on this machine, so this removal left your user Path alone.",
+  "uninstall_path_error": "Reading your user Path did not work on this machine, so this removal left the value as it found it.",
+  "uninstall_path_write_error": "Writing your user Path did not work on this machine, so this removal left the value as it found it. The entry this app added is still on it: {detail}, under the registry key HKCU\\Environment.",
+  "retry_label": "Run This Step Again",
+  "picker_menu_label": "Choose a folder"
+}

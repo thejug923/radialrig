@@ -1,0 +1,26 @@
+<evaluation>
+   <qa_pair>
+      <question>A governed record carries both a label saying what kind of support stands behind its ruling and a stamp saying when it was last checked, and a routine re-check must never promote the label. Exactly two in-force records set out all three values that label may take; one only defines them, the other carries the argument for keeping the two fields apart. Give the repository-relative path of the record that carries the argument, exactly as the retrieval surface reports it.</question>
+      <answer>docs/decisions/D-19-grade-semantics.md</answer>
+   </qa_pair>
+   <qa_pair>
+      <question>The retrieval contract withholds the body of an over-long agent-facing rule file and serves a refusal instead. It says the line limit it applies is borrowed from one of the corpus's own research topics. Name that topic exactly as the guidance catalog spells it.</question>
+      <answer>documentation-bloat</answer>
+   </qa_pair>
+   <qa_pair>
+      <question>An adopter is configuring a search tool so that past positions stay out of default results. The corpus records one glob form as the one the route map states. Reply with that form only: the glob itself, without the surrounding backticks the records set it in.</question>
+      <answer>!**/docs/archive/**</answer>
+   </qa_pair>
+   <qa_pair>
+      <question>A decision record is amended: the new text takes over the live file, and the text it displaced is preserved as its own archive entry. That entry's filename is built from the record's key plus a month stamp. Which numbered subsection of the change procedure prescribes that filename? Answer as a section number, for example 8.4.</question>
+      <answer>8.1</answer>
+   </qa_pair>
+   <qa_pair>
+      <question>A governed record settles which reviewer signs off on database schema changes. The team replaces that lone reviewer with a rotating pair who must both agree before anything ships. Under this corpus's change procedure, the rewritten record keeps its identifier. Answer True or False.</question>
+      <answer>True</answer>
+   </qa_pair>
+   <qa_pair>
+      <question>When a query matches no key and no title, the retrieval surface returns candidate keys instead of the best-scoring record body. The retrieval contract cites one decision record as the reason for that behaviour. Give that record's title exactly as the catalog spells it.</question>
+      <answer>Concept queries resolve through typed candidates</answer>
+   </qa_pair>
+</evaluation>

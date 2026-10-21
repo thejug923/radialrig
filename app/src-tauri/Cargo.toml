@@ -1,0 +1,91 @@
+[package]
+name = "radialrig-app"
+version = "0.1.0"
+description = "RadialRig desktop shell, a Radial 47 product"
+authors = ["Radial 47"]
+edition = "2021"
+publish = false
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2.7"
+
+# The app updates itself (PLAN-0021 phase 3, prescription 2), through
+# Tauri's own updater, called from Rust and never from a page (Decided 9).
+#
+# Pinned to one version. 2.12.0 is the source read for what this phase
+# leans on: the signature check before anything installs, the hook that
+# runs before the Windows installer starts, and the reopen after a
+# passive install, which `restart_after_install` turns on by default
+# (src/updater.rs:197). A move means reading those again; 2.13 also
+# needs tauri 2.12, a step this phase does not take.
+#
+# Default features off, and one back on. `rustls-tls` keeps it on rustls,
+# as reqwest above is; the native stack would bring native-tls and
+# openssl-sys in (Assumed 2). `zip` is left out: it only unpacks the
+# zipped update bundles of Tauri v1, and the release signs the plain
+# installer and the plain AppImage. `system-proxy` is left out: it reads
+# the Windows proxy settings, which the first run's own downloads above
+# never read, so a machine that got through those reaches the release
+# page the same way.
+tauri-plugin-updater = { version = "=2.12.0", default-features = false, features = ["rustls-tls"] }
+# The base64 the updater decodes a signature with (its `^0.22`, already in
+# this build through it and reqwest, so nothing new compiles). The app
+# reads the signature's trusted comment to refuse an update signed for
+# another version, and decoding it with the same engine means the comment
+# read is, byte for byte, the one the plugin verified (PLAN-0021 phase 3
+# review, the owner's decision of 2026-10-03).
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# D1's archive: one https GET, one digest over the bytes it answered
+# with, and the two members read out of that same buffer.
+#
+# reqwest carries rustls and nothing else: the platform's own tls stack
+# would drag native-tls in behind it, and the default feature set adds a
+# proxy reader and http2 this one GET has no use for.
+reqwest = { version = "0.13", default-features = false, features = [
+  "blocking",
+  "rustls",
+] }
+sha2 = "0.10"
+# Reading only, and only the one compression the archive uses. The
+# default set would build five more codecs plus a writer's optimiser.
+zip = { version = "8", default-features = false, features = [
+  "deflate-flate2-zlib-rs",
+] }
+
+# The Linux archive is a tar.gz where the Windows one is a zip
+# (PLAN-0009 phase 3 prescription 2). Both readers compile on both
+# platforms so one suite holds them, which is why these are not gated
+# behind cfg(unix). flate2 rides the same zlib-rs backend the zip
+# feature above already pulls in.
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
+tar = { version = "0.4", default-features = false }
+
+# The process group that stands in for the Job object on Linux
+# (PLAN-0009 phase 3 prescription 4): setpgid before exec, one kill to
+# the group when the run ends.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# D9's backstop: the Job object that ends the engine when this process
+# ends, however it ends. D2's Path entry reads and writes one registry
+# value and tells the desktop it changed. The process list is how the
+# engine swap finds the programs that hold the engine (PLAN-0021 phase 2,
+# prescription 2).
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_Environment",
+  "Win32_System_JobObjects",
+  "Win32_System_Registry",
+  "Win32_System_Threading",
+  "Win32_UI_WindowsAndMessaging",
+] }

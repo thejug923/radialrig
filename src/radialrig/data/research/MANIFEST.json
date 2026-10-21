@@ -1,0 +1,42 @@
+{
+  "generated_by": "radialrig-index",
+  "source": "research/",
+  "files": [
+    {
+      "path": "research/agent-focus/context-rot/guidance.md",
+      "sha256": "aac63c93bd24dec5e31a6f4b4cbc7b2962866009e7bbee4fbcd651ccc462c8f0"
+    },
+    {
+      "path": "research/agent-focus/documentation-bloat/guidance.md",
+      "sha256": "1c186db33ab5d2513fefda875994891bb946dd94d1cea7a528f53717277c68fa"
+    },
+    {
+      "path": "research/agent-focus/memory-management/guidance.md",
+      "sha256": "264dad9ecd6f57f5ada1fbe87494dad03e9219258bfc4a802dd09c82d99bf6db"
+    },
+    {
+      "path": "research/human-focus/anti-hobbling/guidance.md",
+      "sha256": "e56b0785ce7c13c9ef744d9fb927ef75e1c9faa304a7e7ef911fa7be7930982f"
+    },
+    {
+      "path": "research/human-focus/app-security/guidance.md",
+      "sha256": "82f5c00b588226145183bd2dc21eda48caf342832c806c1b76e9792b9867f3de"
+    },
+    {
+      "path": "research/human-focus/blocked-tasks/guidance.md",
+      "sha256": "432cd637638238bc5d04fecf0f27e63deae84549b4d2f7c466037a963d364db0"
+    },
+    {
+      "path": "research/human-focus/expectation/guidance.md",
+      "sha256": "f04e7f7b4ac5542ed5865eb51010de0fc3f92cff5a8c7643b376f5a40848e2d4"
+    },
+    {
+      "path": "research/human-focus/untrusted-content/guidance.md",
+      "sha256": "5aa3b26c72d8ff8be2dec7527892ea3d96ed9a66b085a65e74b08935cec822c8"
+    },
+    {
+      "path": "research/human-focus/visualizations/guidance.md",
+      "sha256": "5aa92252bf9b7ff96b61b532748b641e63afe2de1ebfb82b44120bb77c6f59ba"
+    }
+  ]
+}

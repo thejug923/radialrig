@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The bootstrap window's capability. Local documents only: the two app commands are reachable from the screen this shell serves itself and from nowhere else, so the engine's own page — which this window navigates to — can invoke nothing.",
+  "local": true,
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "allow-bootstrap-proceed",
+    "allow-bootstrap-retry"
+  ]
+}

@@ -1,0 +1,12 @@
+SpaceGrotesk-Medium.woff2 is vendored, unmodified, from the upstream
+Space Grotesk repository:
+
+  https://raw.githubusercontent.com/floriankarsten/space-grotesk/master/fonts/woff2/static/SpaceGrotesk-Medium.woff2
+
+Retrieved 2026-08-18. sha256:
+f20a85be4c8a74ddad94d46fcce503666498855e5a87755d75cd728d801bbe58
+
+The file is covered by the SIL Open Font License beside it in OFL.txt,
+copied from brand/OFL.txt in this repository. Space Grotesk Medium (500)
+is the brand face; the installer page embeds this file and requests no
+font from the network.

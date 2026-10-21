@@ -1,0 +1,29 @@
+* text=auto
+# Packaged data ships byte-for-byte: hashes in MANIFEST.json and mount
+# manifests are computed over LF bytes, so checkout must not rewrite them.
+src/radialrig/data/** text eol=lf
+# The wheel packs the bytes on disk, and app/src/bootstrap.json pins the
+# sha256 of that wheel. So every file the wheel carries must hold the
+# same bytes on every checkout, whichever tool last wrote it: the whole
+# package, and the LICENSE hatchling copies into the wheel's dist-info.
+# BUG-0007 is the release that refused over a CRLF and LF mismatch.
+src/radialrig/** text eol=lf
+LICENSE text eol=lf
+# The live research tree must materialize with the same bytes as its
+# packaged copies, or the drift test fails on every Windows clone and
+# radialrig-index records hashes of CRLF bytes nobody else reproduces.
+research/** text eol=lf
+# Staged guidance is copied into research/ on promotion, so it keeps the
+# same bytes.
+research-staging/** text eol=lf
+# The deb maintainer scripts run under dpkg's /bin/sh: a CRLF first
+# line reads as a bad interpreter and the package fails to remove.
+app/src-tauri/installer/deb/** text eol=lf
+# The rules above mark everything under data/ as text. The web assets
+# PLAN-0005 Phase 4 ships include a woff2 and the favicon raster set:
+# those are byte streams that happen to contain 0x0D, and eol
+# normalization would corrupt them on the way into or out of a checkout.
+# Later patterns win, so these three narrow the rule above.
+*.woff2 binary
+*.png binary
+*.ico binary

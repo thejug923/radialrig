@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RadialRig</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main>
+    <!-- The name and the endorsement stand together, the shape the
+         engine's own masthead uses. -->
+    <header class="masthead">
+      <div class="mark">
+        <img class="dark" src="marks/radialrig-symbol-dark.svg" alt="">
+        <img class="light" src="marks/radialrig-symbol-light.svg" alt="">
+      </div>
+      <h1>RadialRig Installer</h1>
+      <p class="endorsement" id="endorsement" data-key="endorsement"></p>
+    </header>
+
+    <!-- One stage, and one state drawn into it at a time. -->
+    <div class="stage">
+
+      <!-- Standing notice, shown only when a debug build is pointed at an
+           overridden package source. A release binary carries no such
+           switch, so this stays empty and out of the way. -->
+      <p class="notice" id="notice" hidden></p>
+
+      <!-- The consent gate: what gets set up, where it lands, and the
+           promise that it comes back out. Every sentence here arrives
+           from strings.json; the markup carries the slots and none of the
+           words. No command, and no removal order: what a reader types to
+           take this back out belongs to the owner manual, not to the
+           screen that asks for the press. -->
+      <div class="center" id="state-gate" hidden>
+        <section class="gate">
+          <div class="gate-main">
+            <h2 id="gate-head" data-key="gate_head"></h2>
+            <p class="friendly" id="gate-lede" data-key="gate_lede"></p>
+            <!-- Two labelled landing places, named as paths a reader can
+                 open, never as a command a reader could run. -->
+            <div class="lands">
+              <div class="lands-row" data-block="gate_programs">
+                <span class="lands-label" data-slot="label"></span>
+                <code data-slot="path"></code>
+              </div>
+              <div class="lands-row" data-block="gate_support">
+                <span class="lands-label" data-slot="label"></span>
+                <code data-slot="path"></code>
+              </div>
+            </div>
+            <!-- What the PATH read found, on the platform where that
+                 step is a report rather than a write. The shell sends
+                 the key and the folder; nothing shows on the platform
+                 that writes. -->
+            <p class="reassure" id="path-report" hidden></p>
+            <p class="reassure" id="gate-reassure" data-key="gate_reassure"></p>
+          </div>
+          <div class="gate-foot">
+            <p id="gate-press-note" data-key="gate_press_note"></p>
+            <button type="button" id="consent" data-key="consent_label"></button>
+          </div>
+        </section>
+      </div>
+
+      <!-- Running and stopped are one panel, because they say the same
+           four things: which step of how many, how far the run got, what
+           is happening, and what more there is to know. The retry control
+           is the one part only a stop that a second press can move
+           carries. -->
+      <div class="center" id="state-status" hidden>
+        <div class="status">
+          <p class="step-label" id="step-label" hidden></p>
+          <div class="steps-track" id="steps-track" aria-hidden="true" hidden>
+            <span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+          </div>
+          <p class="saying" id="saying"></p>
+          <p class="detail" id="detail" hidden></p>
+          <p class="detail" id="held" hidden></p>
+          <div class="actions" id="actions" hidden>
+            <button type="button" id="retry" data-key="retry_label"></button>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </main>
+
+  <!-- The filler, in its own file. The document keeps markup and the
+       script keeps code, so each is one surface the sweeps reach. -->
+  <script src="bootstrap.js" defer></script>
+</body>
+</html>

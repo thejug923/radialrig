@@ -1,0 +1,177 @@
+name: docs-gardening
+
+on:
+  pull_request:
+    branches: [master, staging, main]
+  schedule:
+    - cron: "0 6 1 * *"
+  workflow_dispatch:
+
+# The same file runs in the private workshop and in the public
+# repository, whose pull requests target `main` (PLAN-0023). A run saves
+# uv's cache only when GitHub reports the repository private, because a
+# public repository's caches can be restored by any run there, a fork's
+# pull request included. A payload without the field reads as public,
+# so a missing value saves nothing.
+
+# The gate tests every platform the product ships to. Windows shipped
+# under PLAN-0008. PLAN-0009 phase 1 ruled that Linux ships too, so the
+# owner's 2026-08-20 Windows-only ruling no longer holds and the gate
+# carries four legs: the engine on Windows, the engine on the current
+# Ubuntu runner, the engine in a debian:12 container, and the desktop
+# shell in a second debian:12 container. With no Ubuntu or Debian
+# hardware in the room, the Linux legs are where most of PLAN-0009 is
+# proved (constraint 12). The two engine Linux legs run the scripted
+# round trip of PLAN-0009 phase 2 prescription 8; the shell leg runs
+# the Rust suite and the headless first-run proof of phase 3.
+
+# The token reads the checkout and nothing more, whatever either
+# repository's setting says.
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: ${{ github.event.repository.private == true && 'auto' || 'false' }}
+      - name: Mechanical checks (C1-C7)
+        run: uv run radialrig-validate
+      - name: Seeded-defect tests (package layout)
+        run: uv run --with pytest --with "mcp>=2,<3" pytest --pyargs radialrig.tests -q
+
+  validate-ubuntu:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: ${{ github.event.repository.private == true && 'auto' || 'false' }}
+      - name: Mechanical checks (C1-C7)
+        run: uv run radialrig-validate
+      - name: Seeded-defect tests (package layout)
+        run: uv run --with pytest --with "mcp>=2,<3" pytest --pyargs radialrig.tests -q
+      - name: Scripted round trip (PLAN-0009 phase 2)
+        run: uv run python scripts/gate_round_trip.py
+
+  # PLAN-0009 phase 3: the desktop shell's Rust suite, then the headless
+  # first-run proof, in a debian:12 container. The webkit build packages
+  # drag the distribution's python3 in, so after the build the proof
+  # step takes every python3 package back out and checks none answers:
+  # the engine install must stand on the Python that uv itself fetches,
+  # pinned at a version Debian 12 does not carry, and never on one the
+  # container happened to hold.
+  app-debian:
+    runs-on: ubuntu-latest
+    container: debian:12
+    steps:
+      - name: Container prerequisites
+        run: >-
+          apt-get update && apt-get install -y --no-install-recommends
+          ca-certificates git curl jq build-essential pkg-config
+          libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev
+          libjavascriptcoregtk-4.1-dev librsvg2-dev
+      - uses: actions/checkout@v4
+      - name: Mark the workspace safe for git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      # The pinned package_source names a wheel the public release only
+      # carries after this same tree promotes and the owner presses
+      # publish, so during a version bump that address answers 404 by
+      # design. The proof measures a wheel built from this checkout
+      # instead, through the debug switch config.rs keeps for exactly
+      # this — its comment records that no https address carries an
+      # unreleased wheel — and the test binary is a debug build, so the
+      # switch is read. The digest printed here is the proof run naming
+      # its artifact.
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: ${{ github.event.repository.private == true && 'auto' || 'false' }}
+      - name: Build the wheel the proof installs
+        run: |
+          uv build --wheel --out-dir dist
+          WHEEL=$(ls dist/radialrig-*-py3-none-any.whl)
+          sha256sum "$WHEEL"
+          echo "RADIALRIG_PACKAGE_SOURCE=$GITHUB_WORKSPACE/$WHEEL" >> "$GITHUB_ENV"
+      # The installer is fetched at one rustup version from the official
+      # distribution host and checked against the sha256 published
+      # beside it before it runs (2026-09-27 review, A-13), the same
+      # shape as the GTK plugin step in release-linux.yml. A mismatch
+      # fails the step. To move the pin, read the version from
+      # https://static.rust-lang.org/rustup/release-stable.toml, then
+      # record it together with the rustup-init.sha256 file that sits
+      # beside the x86_64-unknown-linux-gnu archive of that version.
+      - name: Rust toolchain
+        env:
+          RUSTUP_VERSION: 1.29.1
+          RUSTUP_INIT_SHA256: dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71
+        run: |
+          INIT="${RUNNER_TEMP:-/tmp}/rustup-init"
+          curl --proto '=https' --tlsv1.2 -sSf -o "$INIT" \
+            "https://static.rust-lang.org/rustup/archive/$RUSTUP_VERSION/x86_64-unknown-linux-gnu/rustup-init"
+          echo "$RUSTUP_INIT_SHA256  $INIT" | sha256sum -c -
+          chmod +x "$INIT"
+          "$INIT" -y --profile minimal --default-toolchain stable
+          rm -f "$INIT"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Shell suite
+        run: cargo test --manifest-path app/src-tauri/Cargo.toml
+      # The proof binary is resolved now, while the link libraries are
+      # still installed: the purge below takes the dev packages with the
+      # distribution Python, so nothing may compile or link after it.
+      - name: Name the built proof binary
+        run: |
+          BIN=$(cargo test --manifest-path app/src-tauri/Cargo.toml --no-run \
+              --message-format=json 2>/dev/null |
+            jq -r 'select(.reason=="compiler-artifact"
+              and .target.name=="radialrig-app"
+              and .profile.test==true
+              and .executable!=null) | .executable' | tail -1)
+          test -x "$BIN"
+          echo "PROOF_BIN=$BIN" >> "$GITHUB_ENV"
+      - name: Take the distribution Python back out
+        run: |
+          apt-mark manual libwebkit2gtk-4.1-0 libgtk-3-0 libsoup-3.0-0 \
+            libjavascriptcoregtk-4.1-0 librsvg2-2 >/dev/null
+          apt-get remove -y --purge 'python3*' >/dev/null
+          apt-get autoremove -y --purge >/dev/null
+          ! command -v python3
+      - name: Headless first-run proof (PLAN-0009 phase 3)
+        run: '"$PROOF_BIN" --ignored'
+
+  validate-debian:
+    runs-on: ubuntu-latest
+    container: debian:12
+    # The container has no Python, so uv would download its newest, and a
+    # new release the locked packages ship no wheels for breaks the gate:
+    # Python 3.15 did on 2026-10-21, when pydantic-core had to build from
+    # source with no compiler here. The export's own Linux check runs the
+    # same minor version.
+    env:
+      UV_PYTHON: "3.14"
+    steps:
+      # The base image carries no certificate store and no git; uv needs
+      # the first to download a Python, and checkout is faster with the
+      # second.
+      - name: Container prerequisites
+        run: apt-get update && apt-get install -y --no-install-recommends ca-certificates git
+      - uses: actions/checkout@v4
+      # The workspace is mounted into the container under another
+      # owner, and git refuses a repository it thinks is somebody
+      # else's. C5 reads its baseline from git HEAD, so the refusal
+      # reads as "no readable git HEAD" without this line. The mark is
+      # system-wide because the suite points HOME at scratch, where a
+      # global one is not read.
+      - name: Mark the workspace safe for git
+        run: git config --system --add safe.directory "$GITHUB_WORKSPACE"
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: ${{ github.event.repository.private == true && 'auto' || 'false' }}
+      - name: Mechanical checks (C1-C7)
+        run: uv run radialrig-validate
+      - name: Seeded-defect tests (package layout)
+        run: uv run --with pytest --with "mcp>=2,<3" pytest --pyargs radialrig.tests -q
+      - name: Scripted round trip (PLAN-0009 phase 2)
+        run: uv run python scripts/gate_round_trip.py

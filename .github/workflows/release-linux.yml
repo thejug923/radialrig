@@ -1,0 +1,206 @@
+name: release-linux
+
+# PLAN-0009 phase 4, prescriptions 1 and 2: the AppImage and the deb,
+# built inside a ubuntu:22.04 container on whichever runner is current,
+# never on the ubuntu-22.04 runner image. The container sets the glibc
+# floor, so the assets serve both first targets and the floor stops
+# depending on GitHub's image list — that image starts deprecating on
+# 2026-09-17 and is gone by 2027-04-17.
+#
+# This workflow builds and uploads artifacts, nothing more. Publishing
+# stays the owner's press: scripts/release.py takes the downloaded
+# artifact directory through --linux, verifies the digests against the
+# checksums file built here, refuses the bundles unless built-from.json
+# names the commit being released and that tree's engine pin, and
+# prints the gh commands it will not run.
+#
+# The owner starts this manually from the Actions page or with
+# `gh workflow run release-linux.yml`. The pull_request trigger fires
+# only when this file itself changes, so the promotion that carries a
+# workflow edit proves the build once in the gate before it can be
+# trusted for a release.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [master, staging, main]
+    paths:
+      - ".github/workflows/release-linux.yml"
+
+# The same file runs in the private workshop and in the public
+# repository, whose pull requests target `main` (PLAN-0023). The two
+# cache steps run only when GitHub reports the repository private,
+# because a public repository's caches can be restored by any run there,
+# a fork's pull request included. A payload without the field reads as
+# public, so a missing value restores and saves nothing; the Tauri CLI
+# then builds from source, as on a cache miss.
+
+# The token reads the checkout and nothing more, whatever either
+# repository's setting says. Uploading the bundles needs no more.
+permissions:
+  contents: read
+
+jobs:
+  bundle-linux:
+    runs-on: ubuntu-latest
+    container: ubuntu:22.04
+    steps:
+      # The base image carries no certificate store, no git and no jq.
+      # The dev packages are Tauri's own Ubuntu prerequisites; patchelf
+      # and file are what linuxdeploy calls while it assembles the
+      # AppImage. No FUSE package: the bundler runs its tools with
+      # APPIMAGE_EXTRACT_AND_RUN=1, so nothing here mounts anything.
+      # zstd is for actions/cache: with it present the cache steps pack
+      # and unpack many times faster than the gzip fallback.
+      - name: Container prerequisites
+        run: >-
+          apt-get update && apt-get install -y --no-install-recommends
+          ca-certificates git curl jq file patchelf build-essential
+          pkg-config libssl-dev libwebkit2gtk-4.1-dev libgtk-3-dev
+          libsoup-3.0-dev libjavascriptcoregtk-4.1-dev librsvg2-dev
+          zstd
+      - uses: actions/checkout@v4
+      # The workspace is mounted into the container under another owner,
+      # and git refuses a repository it thinks is somebody else's.
+      - name: Mark the workspace safe for git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      # The installer is fetched at one rustup version from the official
+      # distribution host and checked against the sha256 published
+      # beside it before it runs (2026-09-27 review, A-13), the same
+      # shape as the GTK plugin step below. A mismatch fails the step.
+      # To move the pin, read the version from
+      # https://static.rust-lang.org/rustup/release-stable.toml, then
+      # record it together with the rustup-init.sha256 file that sits
+      # beside the x86_64-unknown-linux-gnu archive of that version, and
+      # keep docs-gardening.yml on the same pin.
+      - name: Rust toolchain
+        env:
+          RUSTUP_VERSION: 1.29.1
+          RUSTUP_INIT_SHA256: dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71
+        run: |
+          INIT="${RUNNER_TEMP:-/tmp}/rustup-init"
+          curl --proto '=https' --tlsv1.2 -sSf -o "$INIT" \
+            "https://static.rust-lang.org/rustup/archive/$RUSTUP_VERSION/x86_64-unknown-linux-gnu/rustup-init"
+          echo "$RUSTUP_INIT_SHA256  $INIT" | sha256sum -c -
+          chmod +x "$INIT"
+          "$INIT" -y --profile minimal --default-toolchain stable
+          rm -f "$INIT"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      # The compiled CLI is a standalone binary, so one cache entry per
+      # version replaces the ten-minute source build on every later run.
+      # The key carries the version literal: bump it together with the
+      # install command below.
+      - name: Cache the Tauri CLI binary
+        id: tauri-cli-cache
+        if: ${{ github.event.repository.private == true }}
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-tauri
+          key: tauri-cli-2.11.4-ubuntu2204
+      # Built from source at the version the owner's machine runs, so
+      # the two build paths cannot drift apart by CLI version.
+      - name: Tauri CLI, pinned
+        if: steps.tauri-cli-cache.outputs.cache-hit != 'true'
+        run: cargo install tauri-cli --version 2.11.4 --locked
+      # The registry and target caches cut the app build itself. A stale
+      # restore is safe: cargo rebuilds whatever the lockfile or compiler
+      # invalidates, and the bundle steps below start from the fresh
+      # build either way.
+      - name: Cache cargo registry and build output
+        if: ${{ github.event.repository.private == true }}
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            app/src-tauri/target
+          key: cargo-ubuntu2204-${{ hashFiles('app/src-tauri/Cargo.lock') }}
+          restore-keys: cargo-ubuntu2204-
+      # Issue 18. linuxdeploy copies the container's libwayland (1.20)
+      # into usr/lib, AppRun puts that directory first on the library
+      # path, and host Mesa built against a newer wayland fails to load.
+      # WebKit then aborts on every rolling distribution. libwayland
+      # belongs to the host graphics stack and must not ride along.
+      #
+      # tauri-bundler 2.9.4 has no exclusion setting, but it skips the
+      # GTK plugin download when the file already sits in its tools
+      # cache, and that plugin runs after every library lands and before
+      # the image is sealed. So this step seeds the cache with the same
+      # script the bundler would fetch, plus a final command that
+      # deletes the libwayland copies.
+      #
+      # The script is fetched at one commit and checked against the
+      # sha256 recorded here before anything is appended to it or made
+      # executable (PLAN-0017 phase 6, release-ci-01): it runs with the
+      # AppDir open, and every digest this workflow records is computed
+      # after it has run, so nothing downstream could catch a changed
+      # script. A mismatch fails the step. To move the pin, read the
+      # script at the new commit, then record the commit and its sha256
+      # together.
+      - name: Seed the GTK plugin with the libwayland exclusion
+        env:
+          GTK_PLUGIN_COMMIT: b5eb8d05b4c0ed40107fe2158c5d8527f94568ef
+          GTK_PLUGIN_SHA256: cb379f9b0733e9ad9f8bd78f8c2fa038aef2478523bb7d4c8e64ff6a1ea3501a
+        run: |
+          CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/tauri"
+          mkdir -p "$CACHE"
+          curl -sSfL -o "$CACHE/linuxdeploy-plugin-gtk.sh" \
+            "https://raw.githubusercontent.com/tauri-apps/linuxdeploy-plugin-gtk/$GTK_PLUGIN_COMMIT/linuxdeploy-plugin-gtk.sh"
+          echo "$GTK_PLUGIN_SHA256  $CACHE/linuxdeploy-plugin-gtk.sh" | sha256sum -c -
+          cat >> "$CACHE/linuxdeploy-plugin-gtk.sh" <<'PATCH'
+
+          # RadialRig issue 18: the host graphics stack supplies wayland.
+          # A bundled copy older than the host Mesa breaks EGL.
+          rm -fv "${APPDIR:?}"/usr/lib/libwayland-*.so*
+          PATCH
+          chmod +x "$CACHE/linuxdeploy-plugin-gtk.sh"
+      - name: Build the two bundles
+        working-directory: app/src-tauri
+        run: cargo tauri build --bundles appimage,deb
+      # Issue 18 regression guard. Extract the built image, print
+      # usr/lib, and fail if any libwayland file is inside. This catches
+      # the regression in CI without an Arch machine.
+      - name: Refuse an AppImage that carries libwayland
+        run: |
+          VERSION=$(jq -r .version app/src-tauri/tauri.conf.json)
+          APPIMAGE="app/src-tauri/target/release/bundle/appimage/RadialRig_${VERSION}_amd64.AppImage"
+          "$APPIMAGE" --appimage-extract > /dev/null
+          echo "usr/lib of the built AppImage:"
+          ls -l squashfs-root/usr/lib
+          FOUND=$(find squashfs-root -name 'libwayland*.so*')
+          rm -rf squashfs-root
+          if [ -n "$FOUND" ]; then
+            echo "libwayland is inside the AppImage:" >&2
+            echo "$FOUND" >&2
+            exit 1
+          fi
+      # The names are the bundler's own: {productName}_{version}_amd64.
+      # Copying by the exact expected name rather than by glob means a
+      # renamed or missing bundle fails here, loudly, not at release
+      # assembly on the owner's machine.
+      #
+      # built-from.json records the commit this run built from and the
+      # engine pin that commit carries, and the checksums cover it. The
+      # release script refuses bundles whose record is not the commit
+      # being released (PLAN-0022 phase 1): v0.1.7 shipped bundles from
+      # an older commit, pinned to a wheel it was not released with.
+      - name: Collect the assets and their digests
+        run: |
+          VERSION=$(jq -r .version app/src-tauri/tauri.conf.json)
+          COMMIT=$(git rev-parse HEAD)
+          PIN=$(jq -r .package_sha256 app/src/bootstrap.json)
+          BUNDLE=app/src-tauri/target/release/bundle
+          mkdir -p dist/linux
+          cp "$BUNDLE/appimage/RadialRig_${VERSION}_amd64.AppImage" dist/linux/
+          cp "$BUNDLE/deb/RadialRig_${VERSION}_amd64.deb" dist/linux/
+          jq -n --arg commit "$COMMIT" --arg pin "$PIN" \
+            '{commit: $commit, package_sha256: $pin}' > dist/linux/built-from.json
+          cd dist/linux
+          sha256sum "RadialRig_${VERSION}_amd64.AppImage" "RadialRig_${VERSION}_amd64.deb" built-from.json > checksums.txt
+          cat built-from.json checksums.txt
+      - name: Upload the artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-bundles
+          path: dist/linux/
+          if-no-files-found: error

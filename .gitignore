@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+# The Claude Code copy of the installed skills and the local harness state under .claude/ stay local; the package is the source of truth (ignored 2026-08-18).
+# The Codex copy under .agents/ is tracked on purpose, written directly like .mcp.json so a clone carries it (PLAN-0013).
+.claude/
+.venv/
+dist/
+*.egg-info/
+
+# Session handoffs stay local; git history holds the tracked era (untracked 2026-08-18)
+handoffs/
+
+# The mount's own record and its unedited seed copies stay local; the package is the source of truth (ignored 2026-08-20)
+.radialrig/
+docs/templates/
+docs/decisions/.gitkeep
