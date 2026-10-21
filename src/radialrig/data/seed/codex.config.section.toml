@@ -1,0 +1,13 @@
+# RadialRig registers its two MCP servers for Codex between these fence
+# comments and maintains the region on upgrade. Keep the region last in
+# the file and add your own settings above it: TOML puts any key written
+# after the end fence inside the last server table. The project must be
+# trusted in Codex for a project config to load.
+
+[mcp_servers.radialrig]
+command = "{{TOOL_CMD}}"
+args = []
+
+[mcp_servers.radialrig-write]
+command = "{{WRITE_TOOL_CMD}}"
+args = []

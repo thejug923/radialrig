@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" data-brand="RadialRig" data-version="1.1" data-status="locked" data-role="app-icon-dark" data-theme="dark" role="img" aria-labelledby="app-icon-dark-title app-icon-dark-desc" data-supersedes="radialrig_application_assets_v1.0_20260720">
+  <title id="app-icon-dark-title">RadialRig app icon, dark theme</title>
+  <desc id="app-icon-dark-desc">Locked application canvas using exact approved RadialRig geometry.</desc>
+  <rect width="1024" height="1024" fill="#111318" rx="184.32" />
+  <g data-locked-source="radialrig-symbol-dark.svg" data-locked-source-sha256="824d07e9b425d4736186b928f0470b25b228894d0a7ac067592bffe43580e2c3" transform="translate(112.000000 213.408451) scale(2.816901408)">
+    <g data-mark="RadialRig Datum and Fixture">
+      <path data-part="lower-datum" d="M0 69H60L119 128H165L184 147H206V212H0Z" fill="#F7F8FC" />
+      <path data-part="upper-fixture" d="M145 0H284V140H223L178 95H105L78 68Z" fill="#F7F8FC" />
+      <path data-part="amber-locator" d="M112 103H170L205 138H187L169 120H130Z" fill="#F8BD5C" />
+    </g>
+  </g>
+</svg>

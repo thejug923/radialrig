@@ -1,0 +1,305 @@
+/* The desktop shell window — PLAN-0008 phase 5 bootstrap screen.
+   Tokens are the locked brand values, copied from
+   src/radialrig/data/web/page.css and never re-derived. Dark is the
+   primary treatment; the light alternate is keyed to
+   prefers-color-scheme and swaps in the light-surface mark and the
+   light-context amber anchor.
+
+   The amber says one thing per screen. On the gate it is the press that
+   agrees. While the run is going it is the step in flight. On a stop a
+   second press can move it is the press forward, and on a stop no press
+   can move it is the segment the run stopped on — because there is no
+   press there to carry it. The focus ring is the one other place the
+   accent appears, and it carries no meaning of its own. */
+
+@font-face {
+  font-family: "RadialRig Space Grotesk";
+  src: url("fonts/SpaceGrotesk-Medium.woff2") format("woff2");
+  font-weight: 500;
+  font-display: swap;
+}
+
+:root {
+  --ground: #111318;
+  --panel: #1a1e27;
+  --sunken: #14171e;
+  --line: #343944;
+  --hair: #22262f;
+  --ink: #f7f8fc;
+  --muted: #aeb5c1;
+  --faint: #8b93a5;
+  --chip: #2a3140;
+  --chip-ink: #d5d9e1;
+  --choice: #202634;
+  --accent: #f8bd5c;
+  --accent-strong: #f0a32d;
+  --on-accent: #111318;
+  --mark-dark: block;
+  --mark-light: none;
+  --shadow: 0 1px 0 rgba(247, 248, 252, 0.03);
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --ground: #f7f8fc;
+    --panel: #ffffff;
+    --sunken: #e9ecf2;
+    --line: #d5d9e1;
+    --hair: #e9ecf2;
+    --ink: #111318;
+    --muted: #343944;
+    --faint: #626a78;
+    --chip: #d5d9e1;
+    --chip-ink: #343944;
+    --choice: #eef0f5;
+    --accent: #a95d00;
+    --accent-strong: #f0a32d;
+    --on-accent: #f7f8fc;
+    --mark-dark: none;
+    --mark-light: block;
+    --shadow: 0 1px 2px rgba(17, 19, 24, 0.06);
+  }
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  background: var(--ground);
+  color: var(--ink);
+  cursor: default;
+  display: flex;
+  flex-direction: column;
+  font-family: "RadialRig Space Grotesk", "Segoe UI", system-ui, sans-serif;
+  font-size: 16px;
+  font-weight: 500;
+  line-height: 1.5;
+  user-select: none;
+}
+
+/* The window's one column. It takes the height rather than asking for a
+   percentage of it, so the panels stay centered in a window of any
+   height without the chain of percentages that resolves to nothing when
+   one link in it is missing. */
+main {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  padding: 18px 24px 16px;
+}
+
+/* --- the masthead ------------------------------------------------------ */
+
+.masthead {
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  flex: none;
+  gap: 10px;
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+}
+
+.mark {
+  flex: none;
+  width: 26px;
+}
+
+.mark img { display: block; height: auto; width: 100%; }
+.mark .dark { display: var(--mark-dark); }
+.mark .light { display: var(--mark-light); }
+
+h1 {
+  font-size: 1rem;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  margin: 0;
+}
+
+.endorsement {
+  color: var(--faint);
+  font-size: 0.76rem;
+  letter-spacing: 0.06em;
+  margin: 0 0 0 auto;
+  text-transform: uppercase;
+}
+
+/* --- the stage every state renders into -------------------------------- */
+
+.stage {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.center {
+  align-items: center;
+  display: flex;
+  flex: 1;
+  justify-content: center;
+}
+
+h2 {
+  font-size: 1.2rem;
+  font-weight: 500;
+  margin: 0 0 0.5rem;
+}
+
+p {
+  color: var(--muted);
+  font-size: 0.92rem;
+  margin: 0 0 0.6rem;
+}
+
+[hidden] { display: none !important; }
+
+/* The debug build's standing notice. Quiet by design: it names a build,
+   not a change to this machine, and it is never in a release. */
+.notice {
+  background: var(--sunken);
+  border: 1px solid var(--hair);
+  border-radius: 3px;
+  color: var(--muted);
+  flex: none;
+  font-size: 0.85rem;
+  margin: 0 0 12px;
+  padding: 0.6rem 0.75rem;
+  user-select: text;
+  word-break: break-all;
+}
+
+/* --- the consent gate --------------------------------------------------- */
+
+/* One short centered panel: plain words and paths, no command-level
+   detail. It sits centered in the window like the status panel. */
+.gate {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  box-shadow: var(--shadow);
+  max-width: 100%;
+  width: 36rem;
+}
+
+.gate-main { padding: 20px 24px 18px; }
+.gate-main .friendly { font-size: 0.95rem; margin-bottom: 1rem; }
+.gate-main .reassure { font-size: 0.92rem; margin: 1rem 0 0; }
+
+/* Where it lands: paths, never commands. */
+.lands {
+  background: var(--sunken);
+  border: 1px solid var(--hair);
+  border-radius: 3px;
+  padding: 0.6rem 0.75rem;
+}
+
+.lands-row { align-items: baseline; display: flex; gap: 12px; }
+.lands-row + .lands-row { margin-top: 0.35rem; }
+
+.lands-label {
+  color: var(--faint);
+  flex: none;
+  font-size: 0.72rem;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  width: 7.5rem;
+}
+
+.lands-row code {
+  color: var(--chip-ink);
+  font-family: "Cascadia Mono", ui-monospace, Consolas, monospace;
+  font-size: 0.82rem;
+  user-select: text;
+}
+
+/* The foot: one plain line and the one press. */
+.gate-foot {
+  align-items: center;
+  border-top: 1px solid var(--line);
+  display: flex;
+  gap: 20px;
+  padding: 12px 24px 14px;
+}
+
+.gate-foot p { flex: 1; font-size: 0.85rem; margin: 0; }
+
+/* --- running and stopped: one centered panel ---------------------------- */
+
+.status {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  box-shadow: var(--shadow);
+  max-width: 100%;
+  padding: 20px 24px 22px;
+  width: 30rem;
+}
+
+.status .step-label {
+  color: var(--faint);
+  font-size: 0.72rem;
+  letter-spacing: 0.09em;
+  margin: 0 0 10px;
+  text-transform: uppercase;
+}
+
+.steps-track { display: flex; gap: 4px; margin-bottom: 14px; }
+.steps-track span { background: var(--hair); border-radius: 2px; flex: 1; height: 4px; }
+.steps-track .done { background: var(--muted); }
+/* Running: the active segment is the screen's one amber element. */
+.steps-track .active { background: var(--accent-strong); }
+/* A stop: the segment stays neutral where a retry press carries the
+   amber, and takes it where no press exists. */
+.steps-track .stopped { background: var(--chip-ink); }
+.steps-track .stopped-final { background: var(--accent-strong); }
+
+.status .saying { color: var(--ink); font-size: 0.95rem; margin: 0; }
+.status .detail { color: var(--muted); font-size: 0.92rem; margin: 0.35rem 0 0; user-select: text; }
+.status .actions { margin-top: 16px; }
+
+/* --- the presses -------------------------------------------------------- */
+
+button {
+  background: var(--choice);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  color: var(--ink);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.92rem;
+  padding: 9px 22px;
+  white-space: nowrap;
+}
+
+/* The one amber element on the gate: the press that agrees. */
+#consent {
+  background: var(--accent-strong);
+  border-color: var(--accent-strong);
+  color: #111318;
+}
+
+/* The one amber element on a stop a second press can move. */
+#retry {
+  background: var(--accent-strong);
+  border-color: var(--accent-strong);
+  color: #111318;
+}
+
+/* Hover swaps the fill to the accent anchor, which is darker in light
+   than the resting Amber 500, so the ink swaps with it. The same rule
+   the engine's own page gives its primary press. */
+#consent:hover, #retry:hover {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+}
+
+/* The accent's one other appearance, and the only one that says nothing:
+   where the keyboard is. */
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }

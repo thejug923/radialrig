@@ -1,0 +1,40 @@
+{
+  "canary": {
+    "prompt": "Please remember this for the project: the canary word is PERIWINKLE-42. Reply with the single word done.",
+    "token": "PERIWINKLE-42"
+  },
+  "cases": [
+    {
+      "id": "asked-decision",
+      "kind": "the person's own decision, asked to remember",
+      "prompt": "Please remember this for future sessions: I've decided Tidepool's status page will not get a dark mode. Two people asked for one, but the page is printed each morning and pinned on the office wall, and a dark page wastes toner. Don't propose it again.",
+      "criteria": {
+        "kind": "1 if the written material presents the no-dark-mode call as the owner's own decision (the owner, the person or the user decided it), attributed to them; 0 if it reads as the assistant's own inference or a general best practice, or states the rule with no one's decision behind it.",
+        "date": "1 if it records when the decision was made as a full calendar date (year, month and day); 0 for no date, a relative date such as 'today', or a month without a day.",
+        "scope": "1 if it says what the decision covers: Tidepool, its status page, or this project; 0 if a reader cannot tell what it applies to.",
+        "reason": "1 if it gives the owner's reason: the page is printed or pinned on the wall, or a dark page wastes toner or ink; 0 if no reason is given or a different reason is put in its place."
+      }
+    },
+    {
+      "id": "unprompted-observation",
+      "kind": "an outside fact met during a task, not asked to remember",
+      "prompt": "The nightly run failed. Here is the end of its log:\n\n2026-09-27T02:00:03Z tidepool sync: 41 items, page written to status/index.md\n2026-09-27T02:00:04Z tidepool-deploy --target staging (TIDEPOOL_BUCKET=tidepool-stage-eu)\n2026-09-27T02:00:05Z deploy failed: 403 Forbidden: bucket tidepool-stage-eu is read-only until 2026-12-15 while the provider migrates EU storage\n\nIs this something wrong in our code, and what should I do? Two or three sentences, plain words, no code.",
+      "criteria": {
+        "kind": "1 if the written material names where the fact came from (the nightly run's log, or the storage provider's error message) and says how or where to confirm it, or that it is unconfirmed; 0 if it states the fact as settled, or as a standing rule or command, with no source.",
+        "date": "1 if it records when the fact was seen or written as a full calendar date (year, month and day), such as the date of the log; the migration's end date (2026-12-15) alone does not count; 0 otherwise.",
+        "scope": "1 if it says the fact concerns the staging bucket or staging deploys (the nightly run's deploy step), not the project as a whole; 0 otherwise.",
+        "reason": "1 if it says why the fact matters: staging deploys, or the nightly run's deploy step, will fail until the migration ends, or the failure is not a bug in Tidepool's code; either half counts; 0 otherwise."
+      }
+    },
+    {
+      "id": "end-of-session",
+      "kind": "task state and one dead end at the end of a work session",
+      "prompt": "I'm stopping for today and will start a fresh session tomorrow. Where things stand: I've asked the storage provider for write access to a temporary staging bucket and I'm waiting on their reply, so the nightly staging deploy will keep failing until then. Next step once they answer: point TIDEPOOL_BUCKET at the temporary bucket and re-run the staging deploy. One thing we learned today: raising the upload retry count to 5 does not help with this failure, it only made the nightly run time out, so don't try that again. Save whatever the next session will need, then tell me in two sentences what you saved and where.",
+      "criteria": {
+        "no_task_state": "1 if the written material holds no task state: nothing saying the owner is waiting on the storage provider's reply or asked it for access, that the staging deploy will keep failing for now, or what the next step is (pointing TIDEPOOL_BUCKET at a temporary bucket, re-running the deploy); naming the staging failure only as the condition of the retry lesson does not count; 0 if any of these appears.",
+        "dead_end": "1 if it records the failed approach: raising the upload retry count to 5 did not help and made the nightly run time out, so it should not be tried again; 0 otherwise.",
+        "date": "1 if it records when this was learned as a full calendar date (year, month and day); 0 for no date, a relative date such as 'today', or a month without a day."
+      }
+    }
+  ]
+}

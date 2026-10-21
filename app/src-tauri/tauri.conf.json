@@ -1,0 +1,63 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "RadialRig",
+  "mainBinaryName": "RadialRig",
+  "version": "0.1.19",
+  "identifier": "com.radial47.radialrig",
+  "build": {
+    "frontendDist": "../src"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "RadialRig",
+        "width": 960,
+        "height": 640,
+        "center": true,
+        "create": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEE4MDYzRUZDMzQ1MjcxNjYKUldSbWNWSTAvRDRHcUYwS2szV1ZHNHpBTlFQU3lOTGNYNjYzd3NBTGd5Wm4rYzV3T1RZcUtnbW0K",
+      "endpoints": [
+        "https://github.com/thejug923/radialrig/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "publisher": "Radial 47",
+    "copyright": "\u00a9 2026 Radial 47",
+    "category": "DeveloperTool",
+    "longDescription": "RadialRig mounts governed records onto a project you already have. The desktop shell installs the engine on first run, is the standing management surface afterward, and takes everything back out from its removal section.",
+    "icon": ["icons/icon.ico", "icons/icon.png"],
+    "linux": {
+      "deb": {
+        "preRemoveScript": "installer/deb/prerm",
+        "postRemoveScript": "installer/deb/postrm"
+      }
+    },
+    "windows": {
+      "signCommand": "powershell -NoProfile -ExecutionPolicy Bypass -File installer/sign.ps1 %1",
+      "nsis": {
+        "installMode": "currentUser",
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico",
+        "languages": ["English"],
+        "displayLanguageSelector": false,
+        "compression": "lzma",
+        "installerHooks": "installer/hooks.nsh"
+      }
+    }
+  }
+}

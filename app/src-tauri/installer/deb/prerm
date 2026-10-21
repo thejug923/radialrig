@@ -1,0 +1,15 @@
+#!/bin/sh
+# The deb stand-in for NSIS_HOOK_PREUNINSTALL — PLAN-0009 phase 4,
+# prescription 1.
+#
+# On Windows that hook runs the app's own binary before anything is
+# deleted, to take back the one Path entry the app recorded writing.
+# On Linux there is no such entry to take back: PLAN-0009 phase 3
+# prescription 3 made the PATH step a report rather than a write, so
+# the app never edits a shell startup file and never records one.
+# This script states that absence rather than leaving it implied,
+# exactly as removal.rs does for the same case, and does nothing.
+#
+# dpkg calls this with remove, upgrade, deconfigure or failed-upgrade
+# in $1. Every case exits 0: a removal must never be stopped here.
+exit 0

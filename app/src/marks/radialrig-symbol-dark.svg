@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 284 212" role="img" aria-labelledby="radialrig-v11-dark-title radialrig-v11-dark-desc" data-brand="RadialRig" data-symbol="Datum and Fixture" data-version="1.1" data-status="locked" data-role="primary" data-optical-compensation="0">
+  <title id="radialrig-v11-dark-title">RadialRig primary symbol</title>
+  <desc id="radialrig-v11-dark-desc">Locked dark primary treatment of the RadialRig Datum and Fixture symbol.</desc>
+  <g data-mark="RadialRig Datum and Fixture">
+    <path data-part="lower-datum" d="M0 69H60L119 128H165L184 147H206V212H0Z" fill="#F7F8FC"/>
+    <path data-part="upper-fixture" d="M145 0H284V140H223L178 95H105L78 68Z" fill="#F7F8FC"/>
+    <path data-part="amber-locator" d="M112 103H170L205 138H187L169 120H130Z" fill="#F8BD5C"/>
+  </g>
+</svg>

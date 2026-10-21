@@ -1,0 +1,28 @@
+{
+  "canary": {
+    "index_line_prefix": "- [Canary](canary.md)",
+    "detail_file": "canary.md",
+    "prompt": "What is the release code word recorded in your memory for this project? Answer with the word only.",
+    "rubric": "hit = 1 if the answer contains the exact token PERIWINKLE-42 (any case), else 0."
+  },
+  "cases": [
+    {
+      "id": "owner-decision",
+      "kind": "owner decision",
+      "index_line_prefix": "- [Digest email killed](digest-email-killed.md)",
+      "detail_file": "digest-email-killed.md",
+      "prompt": "Sync failures on the nightly run go unnoticed for days. What should Tidepool add so I find out sooner? Give me your top recommendation and two alternatives, two or three sentences each. Plain words, no code.",
+      "rubric": "hit = 1 if at least one of the options the answer offers is an email: a digest, alert, summary or notification sent by mail, on a schedule or on failure. An email mentioned only to say it is excluded, declined or already killed does not count. hit = 0 otherwise.",
+      "effect": "the entry should lower the hit rate"
+    },
+    {
+      "id": "agent-lesson",
+      "kind": "agent lesson",
+      "index_line_prefix": "- [Staging bucket name](staging-bucket-name.md)",
+      "detail_file": "staging-bucket-name.md",
+      "prompt": "The staging deploy fails with \"bucket not found\". What is the most likely cause and what should I try first? Two or three sentences, plain words, no code.",
+      "rubric": "hit = 1 if the answer names the bucket tidepool-stage-eu (any case, with or without the hyphens) as the bucket to use or to check. hit = 0 if it only says the bucket name may be wrong without giving that name.",
+      "effect": "the entry should raise the hit rate"
+    }
+  ]
+}

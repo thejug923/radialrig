@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 284 212" role="img" aria-labelledby="radialrig-v11-light-title radialrig-v11-light-desc" data-brand="RadialRig" data-symbol="Datum and Fixture" data-version="1.1" data-status="locked" data-role="alternate" data-optical-compensation="2">
+  <title id="radialrig-v11-light-title">RadialRig alternate symbol</title>
+  <desc id="radialrig-v11-light-desc">Locked light alternate treatment of the RadialRig Datum and Fixture symbol.</desc>
+  <defs>
+    <clipPath id="radialrig-v11-light-lower-boundary" clipPathUnits="userSpaceOnUse"><rect x="-8" y="69" width="300" height="151"/></clipPath>
+    <clipPath id="radialrig-v11-light-upper-boundary" clipPathUnits="userSpaceOnUse"><rect x="-8" y="-8" width="300" height="148"/></clipPath>
+  </defs>
+  <g data-mark="RadialRig Datum and Fixture">
+    <path data-part="lower-datum" d="M0 69H60L119 128H165L184 147H206V212H0Z" fill="#111318"/>
+    <path data-part="upper-fixture" d="M145 0H284V140H223L178 95H105L78 68Z" fill="#111318"/>
+    <path data-part="lower-seam-optical-compensation" d="M60 69L119 128H165L184 147H206" fill="none" stroke="#111318" stroke-width="4" stroke-linecap="butt" stroke-linejoin="miter" clip-path="url(#radialrig-v11-light-lower-boundary)"/>
+    <path data-part="upper-seam-optical-compensation" d="M78 68L105 95H178L223 140" fill="none" stroke="#111318" stroke-width="4" stroke-linecap="butt" stroke-linejoin="miter" clip-path="url(#radialrig-v11-light-upper-boundary)"/>
+    <path data-part="amber-locator" d="M112 103H170L205 138H187L169 120H130Z" fill="#F8BD5C"/>
+  </g>
+</svg>
