@@ -39,7 +39,7 @@ installer's name, the icons and the marks. A fork uses its own.
 
 | Command | What it does |
 | --- | --- |
-| `radialrig mount [PATH]` | add the seed files to a project |
+| `radialrig mount [PATH]` | add the seed files to a project. It refuses a folder inside a project that's already mounted: a project with several parts keeps one mount at its root, as its `docs/spec.md` says |
 | `radialrig unmount [PATH]` | undo the mount, and list anything it leaves with the reason |
 | `radialrig upgrade [PATH]` | update the seed files you haven't edited, and the skills the project already has |
 | `radialrig adopt [PATH]` | rebuild a lost mount record from the files in place |

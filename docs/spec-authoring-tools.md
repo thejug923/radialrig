@@ -6,11 +6,11 @@ status: in-force
 grade: decided
 owner: thejug923
 scope: RadialRig
-effective: 2026-09-05
-last-verified: 2026-09-05
+effective: 2026-10-22
+last-verified: 2026-10-22
 supersedes: none
 replaced-by: none
-depends-on: D-18
+depends-on: D-06, D-09, D-18, D-19, D-21, D-22, D-23, D-35
 ---
 
 **Status: in-force.** This is the interface contract for the authoring
@@ -158,9 +158,10 @@ changed, so the review leaves a mark.
 **The verb identifies the chain; the caller does not declare it.** It
 walks `depends-on` from the changed record, direct and transitive, and
 **rejects a call that leaves any dependent untouched**, naming the ones
-missed. A caller who propagates to two of three dependents gets a
-rejection, not an applied result. `metadata` mode changes no position, so
-nothing propagates and the chain is not walked.
+missed. A caller who propagates to two of three dependents gets an
+`error` naming the third, and nothing is written. `metadata` mode
+changes no position, so nothing propagates and the chain is not
+walked.
 
 **A propagation entry may not change what a dependent rules** (D-18
 constraint 8). Mechanically: the dependent's `## Ruling` section must
@@ -214,7 +215,7 @@ C1 catches only a duplicate among in-force records, so the verb tests the
 wider rule SPEC-1 section 8 states: at most one file holds a given `id`,
 and an id is never reused
 ([D-06](decisions/D-06-stable-identifiers.md)). A reused id returns
-`rejected` naming the file that holds it.
+`error` naming the file that holds it.
 
 ## 7. Result shapes
 
@@ -222,7 +223,7 @@ and an id is never reused
 | --- | --- | --- |
 | `applied` | `paths` (written, sorted), `inherited` (failure lines present before and after), `summary` (the sentence, echoed for the person's approval) | Every path landed |
 | `rejected` | `failures` (the lines the change added), `paths` (would have been written), `reason` | Nothing was written |
-| `error` | `message` | The call was malformed |
+| `error` | `message` | The verb refused the call before the gate ran |
 
 `rejected` is the ordinary outcome of a change that does not yet pass. It
 is not an error, and the caller is expected to iterate against it: C2, C3
@@ -231,8 +232,14 @@ text (D-18 constraint 5, and the consequence recorded there). An empty
 or overlong `summary` comes back this way too, with `failures` empty and
 the `reason` naming the fix (section 1, guarantee 6).
 
-`error` covers a missing field, an unknown `mode`, an `id` no record
-holds, or a `path` outside the governed layout. The server never
+`error` covers every refusal the verb makes before the gate runs, such
+as an `id` no record holds or one the text changes or reuses, a path
+already taken or outside the governed layout, a `metadata` call that
+changes more than `last-verified`, or a propagation that is
+incomplete, unstamped or changes what a dependent rules. A call the
+tool schema refuses, a missing field, an empty `id`, `path` or
+`text`, or a `mode` other than the two, gets the protocol layer's
+validation error and never reaches the verb. The server never
 substitutes a default, never guesses a mode, and never converts a
 rejection into an error or the reverse.
 

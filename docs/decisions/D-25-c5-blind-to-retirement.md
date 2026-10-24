@@ -6,8 +6,8 @@ status: in-force
 grade: verified
 owner: thejug923
 scope: RadialRig
-effective: 2026-08-29
-last-verified: 2026-09-05
+effective: 2026-10-22
+last-verified: 2026-10-22
 supersedes: none
 replaced-by: none
 depends-on: D-23
@@ -67,8 +67,10 @@ compares the verb path against a hand baseline, and an 8.3 that renames
 its `id` passes the hand path and fails the verb path. It was found by
 building the tool, not by running the comparison (testbed gap G17).
 
-The repository has never performed an 8.2 or 8.3 on a live record, so no
-existing record slipped through. The archive holds 8.1 history entries,
+The repository's one 8.3 on a live record, PLAN-0007 retired to
+PLAN-0008 on 2026-08-19, went through `retire_ruling`, so no existing
+record slipped through. The archive otherwise holds 8.1 history
+entries,
 which are new files beside a record that stayed in place, and C5 reads
 those correctly.
 

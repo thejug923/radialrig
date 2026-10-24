@@ -6,8 +6,8 @@ status: in-force
 grade: verified
 owner: thejug923
 scope: RadialRig
-effective: 2026-08-17
-last-verified: 2026-09-27
+effective: 2026-10-22
+last-verified: 2026-10-22
 supersedes: none
 replaced-by: none
 depends-on: D-08
@@ -26,9 +26,9 @@ ids and never states a range of them.
 
 A citation is different and stays allowed: a rule in the route map may
 cite the record that grants it, as rule 2 cites D-04. That is one id
-attached to one rule, and it goes stale only if that record is retired —
-which the change procedure catches. An enumeration goes stale every time
-a record is added.
+attached to one rule, and it goes stale only if that record is retired.
+No check reads the route map, so the review of that retirement has to
+catch it. An enumeration goes stale every time a record is added.
 
 Where a reader needs the catalog, they call `list_rulings` or read
 `docs/decisions/` directly.

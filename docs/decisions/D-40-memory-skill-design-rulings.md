@@ -6,8 +6,8 @@ status: in-force
 grade: decided
 owner: thejug923
 scope: RadialRig
-effective: 2026-10-09
-last-verified: 2026-10-09
+effective: 2026-10-22
+last-verified: 2026-10-22
 supersedes: none
 replaced-by: none
 depends-on: D-30, D-36, D-37
@@ -93,12 +93,13 @@ unmeasured claim, which requires rule 6.
 
 ## Consequences
 
-- The execution plan for the skill, when it lands in `docs/plans/`,
-  executes under this record and [D-36](D-36-skills-kit-form.md),
+- The execution plan for the skill, PLAN-0020, executed under this
+  record and [D-36](D-36-skills-kit-form.md),
   [D-37](D-37-shipped-skill-constraints.md) and
-  D-38.
-- `evals/` gains the model-driven ablation of rule 6 before the skill is
-  registered in the skill catalog.
+  D-38, and closed on
+  2026-09-29.
+- `evals/` gained the model-driven ablation of rule 6 on 2026-09-27,
+  before the skill entered the skill catalog on 2026-09-28.
 - The memory-management research topic under `research/` carries lines
   the same research found wrong or incomplete; those corrections go
   through the promotion procedure in `research-staging/README.md`, not

@@ -722,6 +722,17 @@ def _mount_conflict_state(exc) -> PageState:
     )
 
 
+def _inside_mounted_state(exc) -> PageState:
+    """A mount refused inside a mounted project, through the same CONFLICT
+    state: the command line's head, no table, since no path is in the way,
+    and its remedy as the note. No control forces past it."""
+    return PageState(
+        CONFLICT, report.REFUSED, False,
+        lines=tuple(report.inside_mounted_report(exc.root, exc.parent)),
+        message=report.inside_mounted_remedy(exc.root, exc.parent),
+    )
+
+
 def compute_state(session: Session) -> PageState:
     """What this project looks like right now. Writes nothing."""
     root = session.root
@@ -769,6 +780,8 @@ def compute_state(session: Session) -> PageState:
         plan = mnt.mount_plan(root, scope=session.scope, owner=session.owner)
     except mnt.MountConflict as exc:
         return _mount_conflict_state(exc)
+    except mnt.InsideMountedProject as exc:
+        return _inside_mounted_state(exc)
     except mnt.MountError as exc:
         return PageState(FAILED, report.ERROR, True, message=str(exc))
     return PageState(
@@ -815,6 +828,8 @@ def perform_mount(session: Session) -> PageState:
         return compute_state(session)
     except mnt.MountConflict as exc:
         return _mount_conflict_state(exc)
+    except mnt.InsideMountedProject as exc:
+        return _inside_mounted_state(exc)
     except (mnt.WriteStopped, cn.WriteStopped) as exc:
         # The writer put back what it could and its sentence says what
         # it could not: a partial press when something is left, a clean

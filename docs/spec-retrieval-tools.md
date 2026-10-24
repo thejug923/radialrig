@@ -6,8 +6,8 @@ status: in-force
 grade: decided
 owner: thejug923
 scope: RadialRig
-effective: 2026-09-05
-last-verified: 2026-09-27
+effective: 2026-10-22
+last-verified: 2026-10-22
 supersedes: none
 replaced-by: none
 depends-on: D-04, D-05, D-07, D-09, D-10, D-13, D-16, D-26, D-31, D-32
@@ -116,10 +116,11 @@ Serves the research guidance catalog
 ([D-32](decisions/D-32-guidance-retrieval-generated.md)). The guidance
 files are the only source: every result is built live from the
 frontmatter and bodies of `research/**/guidance.md`, and
-`research/INDEX.md` is never read. That index is generated output for
-humans, rendered by the `radialrig-index` command from the same
-loader, and never authoritative
-([D-07](decisions/D-07-generated-never-authoritative.md)).
+`research/INDEX.md` is never read. That index is generated output,
+rendered by the `radialrig-index` command from the same loader, kept
+as the agents' file fallback when the retrieval tools are absent
+([D-31](decisions/D-31-human-agent-doc-split.md) rule 4), and never
+authoritative ([D-07](decisions/D-07-generated-never-authoritative.md)).
 
 **Input:** `{ "topic"?: string }`
 
@@ -153,6 +154,9 @@ ruling.
 
 ## 6. Error shape
 
-A malformed call (missing `query`, unknown `type` value) returns
-`kind: "error"` with `message`. The server never substitutes a default
-query and never converts an error into a guess.
+A call the tool schema refuses, a missing or empty `query`, gets the
+protocol layer's validation error and never reaches the tool. A
+malformed call that does reach it, an unknown `type` value or a query
+of only whitespace, returns `kind: "error"` with `message`. The server
+never substitutes a default query and never converts an error into a
+guess.

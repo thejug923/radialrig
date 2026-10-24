@@ -205,6 +205,9 @@ def _cmd_mount(args, root: Path) -> int:
     except mnt.MountConflict as exc:
         _emit(report.conflict_report(exc.conflicts, dry_run=args.dry_run))
         return REFUSED
+    except mnt.InsideMountedProject as exc:
+        _emit(report.inside_mounted_report(exc.root, exc.parent, dry_run=args.dry_run))
+        return REFUSED
     except mnt.MountError as exc:
         return _fail(str(exc))
 

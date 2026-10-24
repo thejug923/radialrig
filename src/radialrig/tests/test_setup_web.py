@@ -615,6 +615,31 @@ def test_a_conflict_shows_the_command_lines_refusal_and_writes_nothing(
     assert run.stop() == report.REFUSED
 
 
+def test_a_folder_inside_a_mounted_project_is_refused_with_no_way_past(
+    tmp_path, walk,
+):
+    # Issue #65: the page refuses what the command line refuses.
+    root = _make_project(tmp_path / "monorepo")
+    mnt.mount(root, scope=SCOPE)
+    part = root / "apps" / "website"
+    part.mkdir(parents=True)
+    before = tree(root)
+
+    run = walk(part)
+    page = run.page()
+    said = text_of(page)
+    assert report.inside_mounted_head(root.resolve()) in said
+    assert report.inside_mounted_remedy(part.resolve(), root.resolve()) in said
+    assert 'value="mount"' not in page
+    assert 'value="survey"' in page
+
+    status, again, _ = run.post(mount_form(run))
+    assert status == 200
+    assert report.inside_mounted_head(root.resolve()) in text_of(again)
+    assert tree(root) == before
+    assert run.stop() == report.REFUSED
+
+
 def test_every_conflict_reason_the_engine_knows_reaches_the_page(tmp_path, walk):
     root = _make_project(tmp_path / "many-conflicts")
     (root / "docs").mkdir()

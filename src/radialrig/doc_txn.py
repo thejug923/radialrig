@@ -36,7 +36,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from radialrig.doc_core import LINK_RE, governed_files, read_governed, strip_code
+from radialrig.doc_core import read_governed
 from radialrig.validate_docs import BaselineUnavailable, git_head_baseline, validate
 
 DOCS = "docs"
@@ -150,64 +150,6 @@ def _check_paths(root: Path, ops: Sequence[Op]) -> str | None:
     return None
 
 
-def _links_escaping(root: Path, rel: str, text: str) -> list[str]:
-    """The link targets in `text`, read as the file at `rel`, that resolve
-    outside `docs/`.
-
-    The same text C4 reads: a link inside a fence or a code span is an
-    example and stops nothing (docs-engine-02).
-    """
-    docs = (root / DOCS).resolve()
-    parent = (root / rel).parent
-    out: list[str] = []
-    for target in LINK_RE.findall(strip_code(text)):
-        target = target.split("#")[0].strip()
-        if not target or target.startswith(("http://", "https://", "mailto:")):
-            continue
-        resolved = (parent / target).resolve()
-        if docs not in resolved.parents and resolved != docs:
-            out.append(target)
-    return out
-
-
-def _escaping_links(root: Path) -> list[str]:
-    """Governed links whose target resolves outside `docs/`.
-
-    The copy holds `docs/` alone, so such a link would fail C4 on the copy
-    and nowhere else — a rejection the change did not earn. No governed
-    record has one today; this reports rather than guesses if that changes.
-    """
-    out: list[str] = []
-    for path in governed_files(root):
-        text = read_governed(path)
-        if text is None:
-            # The validator names it under C2 on both sides of the gate;
-            # it holds no link this can read, and it stops no change.
-            continue
-        rel = path.relative_to(root).as_posix()
-        out.extend(f"{rel} -> {target}" for target in _links_escaping(root, rel, text))
-    return out
-
-
-def _escaping_in_ops(root: Path, ops: Sequence[Op]) -> str | None:
-    """The complaint for a change whose own text links outside `docs/`.
-
-    C4 on the copy would call such a link missing when it exists live,
-    and an agent reading that would break a working link to satisfy it
-    (docs-engine-04). The real constraint is named instead.
-    """
-    for op in ops:
-        rel = op.path if isinstance(op, Write) else op.dst
-        for target in _links_escaping(root, rel, op.text):
-            return (
-                f"path '{rel}' links to '{target}', which resolves outside "
-                f"{DOCS}/. The transaction validates a copy of {DOCS}/ alone "
-                "and cannot check a link beyond it, so a record written by a "
-                f"verb links only inside {DOCS}/."
-            )
-    return None
-
-
 def _archive_overwrite(
     root: Path, baseline: dict[str, dict[str, str]], ops: Sequence[Op]
 ) -> str | None:
@@ -289,7 +231,11 @@ def _perform(root: Path, ops: Sequence[Op]) -> None:
 
 
 def _stage_copy(root: Path, tmp: Path, ops: Sequence[Op]) -> Path:
-    """A copy of `docs/` with the change applied. The live tree is untouched."""
+    """A copy of `docs/` with the change applied. The live tree is untouched.
+
+    Nothing outside `docs/` is copied: `validate` looks a link target there
+    up in the live tree, which no verb writes (BUG-0023).
+    """
     copy = tmp / "corpus"
     shutil.copytree(root / DOCS, copy / DOCS)
     _perform(copy, ops)
@@ -375,18 +321,6 @@ def apply_change(
     if complaint:
         return TxnError(message=complaint)
 
-    escaping = _escaping_links(root)
-    if escaping:
-        return TxnError(
-            message=(
-                "governed links resolve outside docs/, which the validation "
-                f"copy cannot reproduce: {', '.join(escaping)}"
-            )
-        )
-    complaint = _escaping_in_ops(root, ops)
-    if complaint:
-        return TxnError(message=complaint)
-
     try:
         baseline = git_head_baseline(root)
     except BaselineUnavailable as exc:
@@ -405,7 +339,9 @@ def apply_change(
 
     with tempfile.TemporaryDirectory(prefix="doc-txn-") as tmpdir:
         copy = _stage_copy(root, Path(tmpdir), ops)
-        after = validate(copy, today, baseline=_baseline_for_copy(baseline, ops))
+        after = validate(
+            copy, today, baseline=_baseline_for_copy(baseline, ops), outside=root,
+        )
 
     paths = targets(ops)
     added = _take(after, Counter(after) - Counter(before))

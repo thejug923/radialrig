@@ -7,7 +7,7 @@ grade: decided
 owner: thejug923
 scope: RadialRig
 effective: 2026-08-29
-last-verified: 2026-09-27
+last-verified: 2026-10-22
 supersedes: none
 replaced-by: none
 depends-on: SPEC-1, D-02

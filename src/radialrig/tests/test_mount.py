@@ -411,6 +411,108 @@ def test_mount_refuses_a_second_time(host):
     assert mnt.survey(host) == mnt.MountSurvey(mounted=True)
 
 
+def test_mount_refuses_a_folder_inside_a_mounted_project(host):
+    # Issue #65: a second mount below a mounted root started a second
+    # rulebook, and sessions under it stopped seeing the root's records.
+    mnt.mount(host, today=MOUNT_DAY)
+    part = host / "apps" / "website"
+    part.mkdir(parents=True)
+    before = tree(host)
+    for verb in (mnt.mount_plan, mnt.mount):
+        with pytest.raises(mnt.InsideMountedProject) as exc:
+            verb(part, today=MOUNT_DAY)
+        assert exc.value.root == part.resolve()
+        assert exc.value.parent == host.resolve()
+    assert tree(host) == before
+
+
+def test_a_rulebook_above_counts_without_its_mount_record(host):
+    # A clone that keeps .radialrig/ out of git has the rulebook and no
+    # record, and resolve_root walks up to it all the same.
+    mnt.mount(host, today=MOUNT_DAY)
+    (host / mnt.MANIFEST_REL).unlink()
+    part = host / "tools"
+    part.mkdir()
+    with pytest.raises(mnt.InsideMountedProject) as exc:
+        mnt.mount(part, today=MOUNT_DAY)
+    assert exc.value.parent == host.resolve()
+
+    # The release review (Fable): a rulebook saved with a byte-order mark
+    # is still a rulebook, as resolve_root treats it.
+    spec = host / "docs" / "spec.md"
+    spec.write_bytes(b"\xef\xbb\xbf" + spec.read_bytes())
+    assert mnt.mounted_ancestor(part.resolve()) == host.resolve()
+
+
+def test_git_declining_another_owners_checkout_falls_back_to_the_marker(host, monkeypatch):
+    # Round 4 (GPT Sol): git's safe.directory refusal says nothing about
+    # whether the folder is a checkout, so the marker's shape decides.
+    task = host / ".worktrees" / "task"
+    added = _git(host, "worktree", "add", "-q", "--detach", str(task))
+    assert added.returncode == 0, added.stderr
+    refused = subprocess.CompletedProcess(
+        args=[], returncode=128, stdout="",
+        stderr="fatal: detected dubious ownership in repository\n"
+               "To add an exception for this directory, call:\n"
+               "\tgit config --global --add safe.directory ...\n",
+    )
+    monkeypatch.setattr(mnt.subprocess, "run", lambda *a, **k: refused)
+    assert mnt._checkout_top(task) is True
+    (host / "plain" / ".git").mkdir(parents=True)
+    assert mnt._checkout_top(host / "plain") is False
+
+
+def test_another_tools_spec_above_does_not_block_a_mount(tmp_path):
+    outer = _make_project(tmp_path / "outer")
+    (outer / "docs").mkdir()
+    (outer / "docs" / "spec.md").write_bytes(b"# Our API spec\n\nNot a rulebook.\n")
+    inner = _make_project(outer / "inner")
+    assert mnt.mounted_ancestor(inner.resolve()) is None
+    mnt.mount(inner, today=MOUNT_DAY)
+    assert mnt.is_mounted(inner)
+
+
+def test_a_checkout_of_its_own_inside_a_mounted_project_may_mount(host):
+    # The 0.1.20 release review (GPT Sol): a git worktree or a nested
+    # repository is a project of its own, whatever folder it sits in, and
+    # Claude Code keeps its worktrees inside the project.
+    task = host / ".worktrees" / "task"
+    added = _git(host, "worktree", "add", "-q", "--detach", str(task))
+    assert added.returncode == 0, added.stderr
+    vendored = host / "vendor" / "lib"
+    vendored.mkdir(parents=True)
+    assert _git(vendored, "init", "-q").returncode == 0
+    mnt.mount(host, today=MOUNT_DAY)
+
+    for checkout in (task, vendored):
+        assert mnt.mounted_ancestor(checkout.resolve()) is None
+        mnt.mount(checkout, today=MOUNT_DAY)
+        assert mnt.is_mounted(checkout)
+    # A plain folder of the project is still refused, and so is one inside
+    # the worktree once the worktree is mounted.
+    for part in (host / "apps", task / "apps"):
+        part.mkdir()
+        with pytest.raises(mnt.InsideMountedProject):
+            mnt.mount(part, today=MOUNT_DAY)
+
+    # Round 2 (GPT Sol): an empty `.git` folder or a stray `.git` file is
+    # not a checkout, and does not let a plain folder past the refusal.
+    empty, stray = host / "empty-marker", host / "stray-marker"
+    (empty / ".git").mkdir(parents=True)
+    stray.mkdir()
+    (stray / ".git").write_text("not a pointer\n", encoding="utf-8")
+    # Round 3: a made-up HEAD, or a pointer to nowhere, is not one either;
+    # git decides.
+    fake_head, dangling = host / "fake-head", host / "dangling-pointer"
+    (fake_head / ".git").mkdir(parents=True)
+    (fake_head / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    dangling.mkdir()
+    (dangling / ".git").write_text("gitdir: no-such-gitdir\n", encoding="utf-8")
+    for part in (empty, stray, fake_head, dangling):
+        with pytest.raises(mnt.InsideMountedProject):
+            mnt.mount(part, today=MOUNT_DAY)
+
+
 # --- 13-15: the manifest and the tokens -------------------------------
 
 def test_manifest_hashes_every_written_file(host):

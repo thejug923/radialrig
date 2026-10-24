@@ -6,11 +6,11 @@ status: in-force
 grade: decided
 owner: thejug923
 scope: RadialRig
-effective: 2026-09-27
-last-verified: 2026-09-27
+effective: 2026-10-22
+last-verified: 2026-10-22
 supersedes: none
 replaced-by: none
-depends-on: D-01, D-02, D-03, D-04, D-05, D-06, D-09, D-10, D-19, D-22, D-24, D-26, D-28
+depends-on: D-01, D-02, D-03, D-04, D-05, D-06, D-09, D-10, D-19, D-22, D-24, D-26, D-28, SPEC-3
 ---
 
 **Status: in-force.** This is the operational rulebook for governed documents.
@@ -214,9 +214,11 @@ question is 8.1.
 interrogative from the title. Ask it of the new regime. If the new
 regime answers it, the question stands and this is **8.1** — keep the
 `id`. If the question no longer has an answer, because what it asks
-about is gone or no longer decides anything, this is **8.3**. When the
-test is genuinely unclear, use 8.1
-([D-06](decisions/D-06-stable-identifiers.md) carries the worked case).
+about is gone or no longer decides anything, the record is retired:
+this is **8.3** when a new record takes the question up in its new
+shape, and **8.2** when nothing does. When the test is genuinely
+unclear, use 8.1 ([D-06](decisions/D-06-stable-identifiers.md)
+carries the worked case).
 
 1. Write the successor as a new record under a new `id`, with
    `supersedes` set to the retired record's id.
@@ -239,7 +241,11 @@ Read every record naming the changed record in `depends-on`, then every
 record depending on those, to the end of the chain. Edit the text wherever
 the change now contradicts it. Update `last-verified` on **every record
 read**, whether or not its text changed, so the review leaves a mark a
-reader can see. No mechanical check covers this step.
+reader can see. No validator check covers this step, and a direct
+edit has no guard. The authoring verbs walk the chain themselves and
+refuse a call that leaves a dependent untouched or unstamped
+([SPEC-3](spec-authoring-tools.md) section 4.3); whether the text was
+edited wherever the change contradicts it stays a judgment.
 
 ### 8.6 Metadata maintenance
 
