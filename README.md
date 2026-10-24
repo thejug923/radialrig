@@ -4,6 +4,12 @@ RadialRig, a Radial 47 product, mounts onto a project you already have.
 It gives your coding agents tools to find, write and check the project's
 governed records, the documents that say which rules are in force.
 
+This two-minute film shows the idea. Picture an office that gets a
+brand-new team every morning, and what it takes for each new team to
+pick up where the last one stopped.
+
+https://github.com/user-attachments/assets/8c8d15f3-d86a-4931-9839-83a696f176e8
+
 This repository's own records follow the rulebook in
 [docs/spec.md](docs/spec.md). Agents start from [AGENTS.md](AGENTS.md).
 
