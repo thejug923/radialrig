@@ -46,6 +46,17 @@ A spec's filename begins with `spec`. The checks collect `docs/spec*.md`
 at the top level of `docs/`, and the three record directories
 recursively; a governed file placed anywhere else is not checked.
 
+A project with several parts, such as a monorepo holding an app, a
+website and some tools, keeps one rulebook and one mount at its root.
+Each part's records go in a subfolder of the record directories, such
+as `docs/decisions/website/` or `docs/plans/tools/`, where the checks
+and the tools read them. An `id` stays unique across the whole project.
+A part may set its own `scope`, so the tools can answer for that part
+alone, and a record may link to files anywhere in the project. Never put
+a second `docs/spec.md` below the root: sessions started under it would
+take that folder for a separate project and stop seeing this one's
+records.
+
 The git environment this project runs on — branches, the human gate, the
 CI budget — is [SPEC-2](spec-git-environment.md).
 
@@ -219,7 +230,9 @@ question is 8.1.
 `## Question` section already does. Then ask it of the new regime. If the
 new regime answers it, the question stands and this is **8.1** — keep the
 `id`. If the question no longer has an answer, because what it asks about
-is gone or no longer decides anything, this is **8.3**.
+is gone or no longer decides anything, the record is retired: this is
+**8.3** when a new record takes the question up in its new shape, and
+**8.2** when nothing does.
 
 Worked case: "Who approves a deploy?" against a new regime of two
 countersigning captains still has an answer — the captains. That is 8.1,
@@ -252,7 +265,10 @@ Read every record naming the changed record in `depends-on`, then every
 record depending on those, to the end of the chain. Edit the text wherever
 the change now contradicts it. Update `last-verified` on **every record
 read**, whether or not its text changed, so the review leaves a mark a
-reader can see. No mechanical check covers this step.
+reader can see. No validator check covers this step. RadialRig's
+authoring tools walk the chain themselves and refuse a change that leaves
+a dependent unread or unstamped; a direct edit has no such guard. Whether
+the text was edited wherever the change contradicts it stays a judgment.
 
 ### 8.6 Metadata maintenance
 

@@ -13,6 +13,7 @@ and D-23 says a missing baseline is never a passing check.
 from __future__ import annotations
 
 import datetime as dt
+import os
 import subprocess
 from pathlib import Path
 
@@ -462,13 +463,13 @@ def test_a_committed_archive_path_is_refused_before_the_baseline_is_rekeyed_over
     assert parse_frontmatter((corpus / bad).read_text(encoding="utf-8"))[0]["id"] == "D-71"
 
 
-# --- Links: fenced ones stop nothing, escaping ones are named -----------
+# --- Links: fenced ones stop nothing, ones outside docs/ resolve live ---
 
 def test_a_link_inside_a_fence_or_a_code_span_stops_nothing(corpus):
     # docs-engine-02: C4 strips fenced blocks and inline code spans before
-    # it looks for links, but _escaping_links ran over the raw text, so one
-    # illustrative link inside a fence froze every verb, repo-wide. Both
-    # scanners now read the same stripped text.
+    # it looks for links, but a refusal that has since gone (BUG-0023) ran
+    # over the raw text, so one illustrative link inside a fence froze
+    # every verb, repo-wide. The example's target does not exist anywhere.
     example = (
         "\n```\n[readme](../../README.md)\n```\n\n"
         "Not `[inline](../../README.md)` either.\n"
@@ -477,7 +478,6 @@ def test_a_link_inside_a_fence_or_a_code_span_stops_nothing(corpus):
         record(rid="D-80", body_extra=example), encoding="utf-8", newline="\n",
     )
     commit(corpus, "a fenced link example")
-    assert t._escaping_links(corpus) == []
 
     out = t.apply_change(
         corpus, [t.Write("docs/decisions/D-91.md", record(rid="D-91"))], today=TODAY,
@@ -492,7 +492,6 @@ def stops_nothing(corpus: Path, example: str) -> None:
         record(rid="D-81", body_extra=example), encoding="utf-8", newline="\n",
     )
     commit(corpus, "a code example")
-    assert t._escaping_links(corpus) == []
     out = t.apply_change(
         corpus, [t.Write("docs/decisions/D-91.md", record(rid="D-91"))], today=TODAY,
     )
@@ -521,26 +520,39 @@ def test_a_shorter_backtick_run_does_not_close_a_code_span(corpus):
     assert "README" in strip_code("~~~\n[readme](../../README.md)\n")  # unclosed stays
 
 
-def test_a_new_record_linking_outside_docs_is_refused_by_its_true_reason(corpus):
-    # docs-engine-04: the copy holds docs/ alone, so C4 on it reported
-    # "link target '../../README.md' does not exist" for a target that
-    # exists live, and an agent reading that would break a working link.
-    # The change's own text is scanned first, and the refusal names the
-    # path, the link and the real constraint.
+def test_a_committed_link_outside_docs_blocks_no_change(corpus):
+    # BUG-0023: the copy holds docs/ alone, and a refusal stopped every
+    # verb in any project where one record linked outside docs/. A
+    # monorepo's records link to the subprojects they govern, so the
+    # write path was off there. C4 now looks such a target up live.
+    (corpus / "tools" / "agent").mkdir(parents=True)
+    (corpus / "tools" / "agent" / "report.md").write_text("# Report\n", encoding="utf-8")
+    (corpus / "docs/decisions/D-80-links-out.md").write_text(
+        record(rid="D-80", body_extra="\nSee [the report](../../tools/agent/report.md).\n"),
+        encoding="utf-8", newline="\n",
+    )
+    commit(corpus, "a record linking outside docs/")
+
+    out = t.apply_change(
+        corpus, [t.Write("docs/decisions/D-91.md", record(rid="D-91"))], today=TODAY,
+    )
+    assert out.kind == "applied", out
+    assert out.inherited == ()
+
+
+def test_a_change_may_link_outside_docs(corpus):
+    # BUG-0023, the change's own text: a new record, and a retirement
+    # moving one into the archive, each linking to a file outside docs/.
     (corpus / "README.md").write_text("# A readme outside docs/\n", encoding="utf-8")
-    before = blobs(corpus)
     link = "\nSee [the readme](../../README.md).\n"
 
     out = t.apply_change(
         corpus, [t.Write("docs/decisions/D-91.md", record(rid="D-91", body_extra=link))],
         today=TODAY,
     )
-    assert out.kind == "error", out
-    assert "docs/decisions/D-91.md" in out.message
-    assert "../../README.md" in out.message
-    assert "docs/" in out.message
-    assert "does not exist" not in out.message
-    assert blobs(corpus) == before
+    assert out.kind == "applied", out
+    assert out.inherited == ()
+    assert link in (corpus / "docs/decisions/D-91.md").read_text(encoding="utf-8")
 
     moved = t.apply_change(
         corpus,
@@ -550,10 +562,327 @@ def test_a_new_record_linking_outside_docs_is_refused_by_its_true_reason(corpus)
         )],
         today=TODAY,
     )
-    assert moved.kind == "error", moved
-    assert "docs/archive/D-90-test.md" in moved.message
-    assert "../../README.md" in moved.message
+    assert moved.kind == "applied", moved
+    assert moved.inherited == ()
+
+
+def test_a_new_area_folders_first_record_may_link_outside_docs(corpus):
+    # The 0.1.20 review's final round (Fable): the first record of a new
+    # area links out of docs/ through a folder only the copy has, and on
+    # Linux and macOS the kernel cannot pass through it to apply `..`.
+    (corpus / "tools").mkdir()
+    (corpus / "tools" / "report.md").write_text("# Report\n", encoding="utf-8")
+    link = "\nSee [the report](../../../tools/report.md).\n"
+    out = t.apply_change(
+        corpus,
+        [t.Write("docs/decisions/tools/D-20.md", record(rid="D-20", body_extra=link))],
+        today=TODAY,
+    )
+    assert out.kind == "applied", out
+    assert out.inherited == ()
+
+
+def test_a_link_outside_docs_to_a_missing_file_is_still_rejected(corpus):
+    # Looking a target up live does not excuse one that is not there.
+    before = blobs(corpus)
+    out = t.apply_change(
+        corpus,
+        [t.Write("docs/decisions/D-91.md",
+                 record(rid="D-91", body_extra="\nSee [gone](../../tools/gone.md).\n"))],
+        today=TODAY,
+    )
+    assert out.kind == "rejected", out
+    assert out.failures == (
+        "C4 (links) docs/decisions/D-91.md: link target '../../tools/gone.md' does not exist",
+    )
     assert blobs(corpus) == before
+
+
+def test_a_link_beyond_the_project_resolves_as_it_does_live(corpus):
+    # A target above the project root is looked up from the project too,
+    # never from the copy's temporary directory.
+    sibling = corpus.parent / f"{corpus.name}-sibling.md"
+    sibling.write_text("# Beside the project\n", encoding="utf-8")
+    link = f"\nSee [beside](../../../{sibling.name}).\n"
+    out = t.apply_change(
+        corpus, [t.Write("docs/decisions/D-91.md", record(rid="D-91", body_extra=link))],
+        today=TODAY,
+    )
+    assert out.kind == "applied", out
+
+
+# The 0.1.20 release review (GPT Sol) found four ways the first form of
+# the BUG-0023 lookup answered differently on the copy than live.
+
+def retire_d90_under_a_link(corpus: Path, link: str):
+    """Write D-80 linking to D-90 by `link`, then retire D-90 by a Move."""
+    (corpus / "docs/decisions/D-80-alias.md").write_text(
+        record(rid="D-80", body_extra=f"\nSee [the record]({link}).\n"),
+        encoding="utf-8", newline="\n",
+    )
+    return t.apply_change(
+        corpus,
+        [t.Move("docs/decisions/D-90-test.md", "docs/archive/D-90-test.md", archived())],
+        today=TODAY,
+    )
+
+
+def test_a_link_into_docs_spelled_in_other_case_is_checked_on_the_copy(corpus):
+    # On a disk that ignores case, DOCS/ is docs/. The link was looked up
+    # live, where D-90 still stood, so its retirement passed the gate and
+    # left the project with a broken link.
+    if not (corpus / "DOCS").exists():
+        pytest.skip("this disk tells DOCS from docs")
+    out = retire_d90_under_a_link(corpus, "../../DOCS/decisions/D-90-test.md")
+    assert out.kind == "rejected", out
+    assert [f for f in out.failures if "D-80-alias.md" in f and "D-90-test.md" in f]
+    assert (corpus / "docs/decisions/D-90-test.md").is_file()
+    assert not (corpus / "docs/archive/D-90-test.md").exists()
+
+
+def test_a_new_record_may_link_a_new_record_spelled_in_other_case(corpus):
+    if not (corpus / "DOCS").exists():
+        pytest.skip("this disk tells DOCS from docs")
+    link = "\nSee [the other](../../DOCS/decisions/D-91.md).\n"
+    out = t.apply_change(
+        corpus,
+        [t.Write("docs/decisions/D-91.md", record(rid="D-91")),
+         t.Write("docs/decisions/D-92.md", record(rid="D-92", body_extra=link))],
+        today=TODAY,
+    )
+    assert out.kind == "applied", out
+
+
+def test_a_link_into_docs_through_a_junction_is_checked_on_the_copy(corpus):
+    make_junction(corpus / "records", corpus / "docs")
+    out = retire_d90_under_a_link(corpus, "../../records/decisions/D-90-test.md")
+    assert out.kind == "rejected", out
+    assert [f for f in out.failures if "D-80-alias.md" in f and "D-90-test.md" in f]
+
+
+def make_junction(link: Path, target: Path) -> None:
+    """A directory junction on Windows, a symlink elsewhere; skip if neither."""
+    try:
+        if os.name == "nt":
+            subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)],
+                           check=True, capture_output=True)
+        else:
+            link.symlink_to(target, target_is_directory=True)
+    except (OSError, subprocess.CalledProcessError):
+        pytest.skip("no junction or symlink can be made here")
+
+
+# Round 2 of that review (GPT Sol) found three more, in the first fix.
+
+def test_a_link_through_a_junction_inside_docs_is_checked_on_the_copy(corpus):
+    # A folder inside docs/ that is a junction to somewhere else is still
+    # docs/ to the verbs, which stage and move through it. Following the
+    # junction out looked the target up live, so moving it passed the
+    # gate and broke the link.
+    elsewhere = corpus / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "D-93-shared.md").write_text(record(rid="D-93"), encoding="utf-8", newline="\n")
+    make_junction(corpus / "docs" / "decisions" / "shared", elsewhere)
+    (corpus / "docs/decisions/D-80-through.md").write_text(
+        record(rid="D-80", body_extra="\nSee [it](shared/D-93-shared.md).\n"),
+        encoding="utf-8", newline="\n",
+    )
+    out = t.apply_change(
+        corpus,
+        [t.Move("docs/decisions/shared/D-93-shared.md", "docs/archive/D-93-shared.md",
+                archived("D-93"))],
+        today=TODAY,
+    )
+    assert out.kind == "rejected", out
+    assert [f for f in out.failures if "D-80-through.md" in f]
+    assert (elsewhere / "D-93-shared.md").is_file()
+
+
+def test_a_folder_that_tells_case_apart_keeps_docs_and_DOCS_apart(tmp_path):
+    # Windows can mark a folder case-sensitive. There DOCS/ is not docs/,
+    # and folding names made a link to a missing DOCS/ file pass.
+    if os.name != "nt":
+        pytest.skip("per-folder case sensitivity is a Windows setting")
+    root = tmp_path / "cased"
+    root.mkdir()
+    made = subprocess.run(
+        ["fsutil.exe", "file", "setCaseSensitiveInfo", str(root), "enable"],
+        capture_output=True, check=False,
+    )
+    if made.returncode != 0:
+        pytest.skip("this machine cannot mark a folder case-sensitive")
+    (root / "docs" / "decisions").mkdir(parents=True)
+    (root / "docs" / "archive").mkdir(parents=True)
+    (root / "docs/decisions/D-90-test.md").write_text(record(), encoding="utf-8", newline="\n")
+    for args in (
+        ["init", "-q", "-b", "master"], ["add", "-A"],
+        ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "seed"],
+    ):
+        subprocess.run(["git", *args], cwd=root, check=True, capture_output=True)
+    link = "\nSee [it](../../DOCS/decisions/D-90-test.md).\n"
+    out = t.apply_change(
+        root, [t.Write("docs/decisions/D-91.md", record(rid="D-91", body_extra=link))],
+        today=TODAY,
+    )
+    assert out.kind == "rejected", out
+    missing = "'../../DOCS/decisions/D-90-test.md'"
+    assert out.failures == (
+        f"C4 (links) docs/decisions/D-91.md: link target {missing} does not exist",
+    )
+
+
+def test_a_network_spelling_of_docs_is_checked_on_the_copy(corpus):
+    # \\localhost\C$\... is the same docs/ by another name.
+    if os.name != "nt" or not corpus.drive:
+        pytest.skip("a Windows drive share")
+    unc = (f"//localhost/{corpus.drive[0]}$/"
+           f"{corpus.relative_to(corpus.anchor).as_posix()}/docs/decisions/D-90-test.md")
+    if not Path(unc).exists():
+        pytest.skip("the drive's administrative share is not reachable")
+    out = retire_d90_under_a_link(corpus, unc)
+    assert out.kind == "rejected", out
+    assert [f for f in out.failures if "D-80-alias.md" in f]
+
+
+# Round 3 of that review (GPT Sol).
+
+def test_a_link_through_a_junction_to_a_folder_of_docs_is_checked_on_the_copy(corpus):
+    # A junction naming docs/decisions, not docs/ itself: the identity
+    # check knew only docs/, so the target was looked up live.
+    make_junction(corpus / "rules", corpus / "docs" / "decisions")
+    out = retire_d90_under_a_link(corpus, "../../rules/D-90-test.md")
+    assert out.kind == "rejected", out
+    assert [f for f in out.failures if "D-80-alias.md" in f]
+
+    # And a new record reached through it is found on the copy.
+    link = "\nSee [the other](../../rules/D-91.md).\n"
+    out = t.apply_change(
+        corpus,
+        [t.Write("docs/decisions/D-91.md", record(rid="D-91")),
+         t.Write("docs/decisions/D-92.md", record(rid="D-92", body_extra=link))],
+        today=TODAY,
+    )
+    assert out.kind == "applied", out
+
+
+def test_an_extended_length_link_is_read_as_windows_reads_it(corpus):
+    # Windows collapses no `..` in a \\?\ path, so a `..` there names
+    # nothing, live or on the copy.
+    if os.name != "nt":
+        pytest.skip("a Windows path form")
+    docs = (corpus / "docs").as_posix()
+    climbing = f"\nSee [it](//?/{docs}/missing/../decisions/D-90-test.md).\n"
+    out = t.apply_change(
+        corpus, [t.Write("docs/decisions/D-91.md", record(rid="D-91", body_extra=climbing))],
+        today=TODAY,
+    )
+    assert out.kind == "rejected", out
+    # Without a `..` it is an ordinary path to docs/, checked on the copy;
+    # a `.`, which pathlib drops for the live check, too (final round,
+    # GPT Sol), in both slash forms.
+    for spelled in (f"//?/{docs}/decisions/D-90-test.md",
+                    f"//?/{docs}/decisions/./D-90-test.md",
+                    "\\\\?\\" + str(corpus / "docs" / "decisions") + "\\.\\D-90-test.md"):
+        out = retire_d90_under_a_link(corpus, spelled)
+        assert out.kind == "rejected", (spelled, out)
+        assert [f for f in out.failures if "D-80-alias.md" in f], spelled
+
+
+# Round 4 of that review (GPT Sol).
+
+def test_a_folder_of_docs_keeps_its_real_place_beside_an_alias_inside_docs(corpus):
+    # With docs/zz-alias -> docs/decisions as well, the map could place
+    # decisions/ at zz-alias, which the copy holds as a plain duplicate.
+    make_junction(corpus / "docs" / "zz-alias", corpus / "docs" / "decisions")
+    make_junction(corpus / "rules", corpus / "docs" / "decisions")
+    out = retire_d90_under_a_link(corpus, "../../rules/D-90-test.md")
+    assert out.kind == "rejected", out
+    assert [f for f in out.failures if "D-80-alias.md" in f and "rules" in f]
+
+
+def test_a_link_spelled_through_an_alias_inside_docs_reaches_the_real_folder(corpus):
+    # Fable's round 4: spelled inside docs/, the link went to the copy's
+    # plain duplicate of the alias, where the moved record still stood.
+    make_junction(corpus / "docs" / "alias", corpus / "docs" / "decisions")
+    out = retire_d90_under_a_link(corpus, "../alias/D-90-test.md")
+    assert out.kind == "rejected", out
+    assert [f for f in out.failures if "D-80-alias.md" in f and "../alias/" in f]
+
+
+def test_an_extended_network_link_is_read_as_a_network_path(corpus):
+    # //?/UNC/host/share/... lost its leading slashes when the prefix was
+    # taken off, and became a relative path.
+    if os.name != "nt" or not corpus.drive:
+        pytest.skip("a Windows drive share")
+    share = f"localhost/{corpus.drive[0]}$/{corpus.relative_to(corpus.anchor).as_posix()}"
+    if not Path(f"//{share}/docs").exists():
+        pytest.skip("the drive's administrative share is not reachable")
+    link = f"//?/UNC/{share}/docs/decisions/D-90-test.md"
+    (corpus / "docs/decisions/D-80-unc.md").write_text(
+        record(rid="D-80", body_extra=f"\nSee [it]({link}).\n"), encoding="utf-8", newline="\n",
+    )
+    # A working link blocks no unrelated change...
+    out = t.apply_change(
+        corpus, [t.Write("docs/decisions/D-91.md", record(rid="D-91"))], today=TODAY,
+    )
+    assert out.kind == "applied", out
+    # ...and retiring its target is caught.
+    out = t.apply_change(
+        corpus,
+        [t.Move("docs/decisions/D-90-test.md", "docs/archive/D-90-test.md", archived())],
+        today=TODAY,
+    )
+    assert out.kind == "rejected", out
+    assert [f for f in out.failures if "D-80-unc.md" in f]
+
+
+def test_an_extended_link_with_a_trailing_dot_is_read_literally(corpus):
+    # Windows trims a trailing dot from an ordinary path, not from a
+    # \\?\ one, where no such file exists.
+    if os.name != "nt":
+        pytest.skip("a Windows path form")
+    docs = (corpus / "docs").as_posix()
+    link = f"\nSee [it](//?/{docs}/decisions/D-90-test.md.).\n"
+    out = t.apply_change(
+        corpus, [t.Write("docs/decisions/D-91.md", record(rid="D-91", body_extra=link))],
+        today=TODAY,
+    )
+    assert out.kind == "rejected", out
+
+
+def test_an_absolute_link_resolves_as_it_does_live(corpus):
+    # An absolute target went through a relative path against the copy:
+    # across drives that raised, and on one drive it landed elsewhere.
+    target = corpus.parent / f"{corpus.name}-absolute.md"
+    target.write_text("# Absolute\n", encoding="utf-8")
+    (corpus / "docs/decisions/D-80-absolute.md").write_text(
+        record(rid="D-80", body_extra=f"\nSee [it]({target.as_posix()}).\n"),
+        encoding="utf-8", newline="\n",
+    )
+    commit(corpus, "an absolute link")
+    out = t.apply_change(
+        corpus, [t.Write("docs/decisions/D-91.md", record(rid="D-91"))], today=TODAY,
+    )
+    assert out.kind == "applied", out
+    assert out.inherited == ()
+
+
+def test_a_link_climbing_past_the_drive_root_resolves_as_it_does_live(corpus):
+    # `..` was collapsed against the copy's temporary folder, so a link
+    # with more steps up than the copy is deep landed somewhere else.
+    target = corpus.parent / f"{corpus.name}-deep.md"
+    target.write_text("# Deep\n", encoding="utf-8")
+    rest = target.relative_to(target.anchor).as_posix()
+    (corpus / "docs/decisions/D-80-deep.md").write_text(
+        record(rid="D-80", body_extra=f"\nSee [it]({'../' * 40}{rest}).\n"),
+        encoding="utf-8", newline="\n",
+    )
+    commit(corpus, "a deep link")
+    out = t.apply_change(
+        corpus, [t.Write("docs/decisions/D-91.md", record(rid="D-91"))], today=TODAY,
+    )
+    assert out.kind == "applied", out
+    assert out.inherited == ()
 
 
 # --- A moved record keeps its inherited failures (docs-engine-03) --------

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import os
 import subprocess
 import sys
 from collections.abc import Mapping
@@ -127,12 +128,156 @@ def git_head_baseline(
     return baseline
 
 
+EXTENDED_PREFIXES = ("\\\\?\\", "//?/")
+
+
+def _link_exists(root: Path, outside: Path | None, base: Path, target: str,
+                 folders: dict[tuple[int, int], Path] | None = None) -> bool:
+    """Whether the link `target`, written in a file in `base`, exists.
+
+    With `outside` None the file system answers, as it always has. With
+    `outside` set, `root` is the authoring verbs' copy of `docs/` (D-18
+    constraint 2) and `outside` the project it was copied from. The link
+    is read from the record's place in the project, with `..` collapsed
+    there, and an absolute target as written. A target spelled inside the
+    project's `docs/`, or passing through one of its folders by another
+    name (`folders`, from `_docs_folders`), is looked up in the copy,
+    which holds the change; any other is looked up where the live check
+    finds it, because no verb writes outside `docs/`. So C4 answers the
+    same on both sides of the gate, a record may link to the code or
+    subproject it is about, and a broken link still fails (BUG-0023).
+
+    Four known differences are left, each needing an unusual setup
+    (BUG-0023): a link spelled with a Windows short (8.3) name into
+    `docs/` may find another short name on the copy, which rejects a
+    change; a change whose own path runs through an alias folder inside
+    `docs/` moves the copy's plain duplicate; and on POSIX, `..` after a
+    symlinked folder inside `docs/` is collapsed before the symlink is
+    followed, and a file symlink outside `docs/` that points at a record
+    is looked up live.
+    """
+    if outside is None:
+        return (base / target).exists()
+    if os.name == "nt" and target.startswith(EXTENDED_PREFIXES):
+        # Read it as the live check does, through pathlib, which drops a
+        # `.`. What is left Windows reads as written: it collapses no `..`
+        # and trims no trailing dot or space. Where that still decides,
+        # answer with the live check's own reading; no verb writes such a
+        # name. Otherwise it is an ordinary absolute path.
+        spelled = str(base / target)
+        rest = spelled[len(EXTENDED_PREFIXES[0]):]
+        if any(part == ".." or part.endswith((".", " "))
+               for part in rest.split(os.sep) if part):
+            return (base / target).exists()
+        if rest[:4].upper() == "UNC" + os.sep:
+            rest = os.sep * 2 + rest[4:]
+        target = rest
+    try:
+        live = outside / os.path.relpath(base, root) / target
+        lexical = Path(os.path.normpath(live))
+        # The folder's real place first, so a spelling through an alias
+        # inside docs/, which the copy holds as a plain duplicate, still
+        # reaches the folder the change moves files in.
+        inside = _known_folder_under(lexical, folders) if folders else None
+        if inside is None:
+            inside = _spelled_under(lexical, outside / "docs")
+    except (OSError, ValueError):
+        return (base / target).exists()
+    if inside is not None:
+        return (root / "docs" / inside).exists()
+    # The collapsed path: on POSIX the raw one would have to enter a
+    # folder the change creates, which exists only on the copy.
+    return os.path.exists(lexical)
+
+
+def _spelled_under(path: Path, folder: Path) -> Path | None:
+    """`path` relative to `folder` when it is spelled inside it, or None.
+
+    A junction inside `docs/` that leads out of it is still `docs/` here,
+    as it is to the verbs, which stage and move through it.
+    """
+    p, f = os.path.normpath(path), os.path.normpath(folder)
+    if p == f:
+        return Path(".")
+    prefix = f.rstrip(os.sep) + os.sep
+    return Path(p[len(prefix):]) if p.startswith(prefix) else None
+
+
+def _docs_folders(docs: Path) -> dict[tuple[int, int], Path]:
+    """Every folder in the project's `docs/`, by file identity, with its
+    place relative to `docs/`.
+
+    The walk enters junctions and symlinked folders, because the verbs
+    stage and move through them, and visits each folder once, so a link
+    that loops back stops it. Every real folder is placed before any
+    folder reached through a link, so a folder `docs/` also links to
+    inside itself keeps its real place.
+    """
+    found: dict[tuple[int, int], Path] = {}
+    real = [(docs, Path("."))]
+    linked: list[tuple[Path, Path]] = []
+    while real or linked:
+        folder, rel = real.pop() if real else linked.pop()
+        try:
+            seen = os.stat(folder)
+            entries = list(os.scandir(folder))
+        except OSError:
+            continue
+        key = (seen.st_dev, seen.st_ino)
+        if key in found:
+            continue
+        found[key] = rel
+        for entry in entries:
+            try:
+                if not entry.is_dir():
+                    continue
+                queue = linked if _is_link(entry) else real
+            except OSError:
+                continue
+            queue.append((Path(entry.path), rel / entry.name))
+    return found
+
+
+def _is_link(entry: os.DirEntry) -> bool:
+    """A symlink, or a Windows junction (`is_junction` from Python 3.12;
+    before that, the reparse-point attribute)."""
+    if entry.is_symlink():
+        return True
+    check = getattr(entry, "is_junction", None)
+    if check is not None:
+        return check()
+    attrs = getattr(entry.stat(follow_symlinks=False), "st_file_attributes", 0)
+    return bool(attrs & 0x400)  # FILE_ATTRIBUTE_REPARSE_POINT
+
+
+def _known_folder_under(path: Path, folders: dict[tuple[int, int], Path]) -> Path | None:
+    """`path` placed in `docs/` when one of the folders it passes through
+    is a folder of `docs/` by another name: a junction, a symlink, another
+    letter case on a disk that ignores case, a network spelling. Decided
+    by file identity, as the file system decides it, and never by folding
+    names, so a disk that tells `DOCS` from `docs` keeps them apart.
+    """
+    tail: list[str] = []
+    for candidate in (path, *path.parents):
+        try:
+            seen = os.stat(candidate)
+        except OSError:
+            seen = None
+        if seen is not None:
+            place = folders.get((seen.st_dev, seen.st_ino))
+            if place is not None:
+                return place.joinpath(*reversed(tail))
+        tail.append(candidate.name)
+    return None
+
+
 def validate(
     root: Path,
     today: dt.date | None = None,
     *,
     baseline: Mapping[str, dict[str, str]],
     files: list[Path] | None = None,
+    outside: Path | None = None,
 ) -> list[str]:
     """Run C1-C7 over the corpus at `root`.
 
@@ -146,10 +291,15 @@ def validate(
 
     `files` lets a caller that already walked the governed tree pass its
     list in; None walks it here.
+
+    `outside` is the tree C4 looks up a link target outside `docs/` in.
+    None looks every target up under `root`. The authoring verbs pass the
+    project when `root` is their copy of `docs/`.
     """
     today = today or dt.date.today()
     failures: list[str] = []
     in_force: dict[tuple[str, str], list[str]] = {}
+    folders = _docs_folders(outside / "docs") if outside is not None else None
 
     for path in (governed_files(root) if files is None else files):
         rel = path.relative_to(root).as_posix()
@@ -204,7 +354,7 @@ def validate(
             target = target.split("#")[0].strip()
             if not target or target.startswith(("http://", "https://", "mailto:")):
                 continue
-            if not (path.parent / target).exists():
+            if not _link_exists(root, outside, path.parent, target, folders):
                 failures.append(f"C4 (links) {rel}: link target '{target}' does not exist")
 
         # C5 — transitions and stable id vs the baseline

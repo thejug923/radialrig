@@ -6,8 +6,8 @@ status: in-force
 grade: decided
 owner: thejug923
 scope: RadialRig
-effective: 2026-09-04
-last-verified: 2026-10-02
+effective: 2026-10-22
+last-verified: 2026-10-22
 supersedes: none
 replaced-by: none
 depends-on: D-36
@@ -85,7 +85,10 @@ says otherwise.
 ## Consequences
 
 - `src/radialrig/tests/test_skill_sources.py` is the mechanical sweep
-  for rules 1–4 and the rewrite's structural rules.
+  for rules 1–4 and the rewrite's structural rules, except rule 3's
+  sweep for the names of the source the skills were rewritten from,
+  which runs in a module kept in the private repository so the public
+  copy never spells them.
 - The rewrite shipped as version 3.0.0; later versions move under
   rule 1.
 - The execution plan PLAN-0006, in `docs/plans/`, executed under this

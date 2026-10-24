@@ -290,6 +290,32 @@ def conflict_report(conflicts, *, dry_run: bool = False) -> list[str]:
     return lines
 
 
+def inside_mounted_head(parent: Path) -> str:
+    """The first line of a mount refused inside a mounted project."""
+    return (f"Refused: this folder is inside the project mounted at {parent}. "
+            "Nothing was written.")
+
+
+def inside_mounted_remedy(root: Path, parent: Path) -> str:
+    """Why, and what to do instead. One wording for both surfaces."""
+    return (
+        "A second mount here would start a second rulebook, and sessions "
+        "started in this folder would stop seeing that project's records. "
+        f"Keep one mount at {parent}, and put this part's records in a "
+        "subfolder of its record directories, such as "
+        f"docs/decisions/{root.name}/."
+    )
+
+
+def inside_mounted_report(root: Path, parent: Path, *,
+                          dry_run: bool = False) -> list[str]:
+    """The whole exit-3 answer for a mount inside a mounted project."""
+    lines = [inside_mounted_head(parent), "", inside_mounted_remedy(root, parent)]
+    if dry_run:
+        lines.append(DRY_RUN_TAIL)
+    return lines
+
+
 def next_step(root: Path) -> tuple[str, str]:
     """The line that closes a mount report, and the command it names.
 

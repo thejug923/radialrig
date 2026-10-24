@@ -169,6 +169,22 @@ def test_dry_run_on_a_conflicted_project_still_refuses(project, capsys):
     assert tree(project) == before
 
 
+def test_a_folder_inside_a_mounted_project_refuses(project, capsys):
+    # Issue #65: one mount per project, at its root.
+    run(capsys, "mount", str(project))
+    part = project / "apps" / "website"
+    part.mkdir(parents=True)
+    before = tree(project)
+    for extra in ((), ("--dry-run",)):
+        code, out, err = run(capsys, "mount", str(part), *extra)
+        assert code == report.REFUSED
+        assert out.splitlines()[0] == report.inside_mounted_head(project.resolve())
+        assert "docs/decisions/website/" in out
+        assert err == ""
+        assert not FORBIDDEN_WORD.search(out)
+        assert tree(project) == before
+
+
 def test_scope_and_owner_reach_the_seed_and_the_record(project, capsys):
     code, _, _ = run(capsys, "mount", str(project),
                      "--scope", "Other Scope", "--owner", "the-team")

@@ -38,10 +38,12 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import unicodedata
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+from radialrig.doc_core import parse_frontmatter
 from radialrig.paths import packaged_seed
 
 MANIFEST_REL = ".radialrig/mount.json"
@@ -164,6 +166,21 @@ class AlreadyMounted(MountError):
     def __init__(self, root: Path) -> None:
         super().__init__(f"{root} is already mounted ({MANIFEST_REL} present)")
         self.root = root
+
+
+class InsideMountedProject(MountError):
+    """The host sits inside a project RadialRig already mounted.
+
+    A second mount there starts a second rulebook, and every session
+    started beneath it resolves to it and stops seeing the outer project's
+    records. A project with several parts keeps one mount at its root, as
+    the seeded SPEC-1 section 2 says (issue #65).
+    """
+
+    def __init__(self, root: Path, parent: Path) -> None:
+        super().__init__(f"{root} is inside the project mounted at {parent}")
+        self.root = root
+        self.parent = parent
 
 
 class NotMounted(MountError):
@@ -917,6 +934,91 @@ def default_scope(root: Path) -> str:
 
 def is_mounted(root: Path) -> bool:
     return (root / MANIFEST_REL).is_file()
+
+
+def mounted_ancestor(root: Path) -> Path | None:
+    """The nearest folder above `root` that RadialRig mounted, or None.
+
+    A folder counts when it carries the mount record, or a rulebook whose
+    frontmatter names SPEC-1, as a clone that keeps `.radialrig/` out of
+    git does. Those are the markers `paths.resolve_root` walks up to, so
+    a session started under `root` lands there. A `docs/spec.md` another
+    tool wrote does not count.
+
+    The walk stops at the top of a git checkout (`_checkout_top`). A
+    repository, a worktree or a submodule is a project of its own,
+    whatever folder it sits in: Claude Code keeps its worktrees inside
+    the project they belong to.
+    """
+    if _checkout_top(root):
+        return None
+    for parent in root.parents:
+        if is_mounted(parent) or _holds_rulebook(parent):
+            return parent
+        if _checkout_top(parent):
+            return None
+    return None
+
+
+def _checkout_top(folder: Path) -> bool:
+    """Whether `folder` is the top of a git checkout.
+
+    A `.git` entry is only the hint; git decides, so an empty folder, a
+    stray file, a made-up `HEAD` or a pointer to nowhere does not count.
+    Where git is not installed the marker's shape decides instead.
+    """
+    marker = folder / ".git"
+    if not (marker.is_dir() or marker.is_file()):
+        return False
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(folder), "rev-parse", "--show-toplevel"],
+            capture_output=True, encoding="utf-8", errors="replace",
+            env=env, timeout=30, check=False,
+        )
+    except FileNotFoundError:
+        return _marker_shape(marker)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if out.returncode != 0 and "safe.directory" in out.stderr:
+        # git declines to read a checkout another account owns; that says
+        # nothing about whether it is one, so the marker's shape decides.
+        return _marker_shape(marker)
+    top = out.stdout.strip()
+    if out.returncode != 0 or not top:
+        return False
+    same = os.path.normcase(os.path.realpath(top))
+    return same == os.path.normcase(os.path.realpath(folder))
+
+
+def _marker_shape(marker: Path) -> bool:
+    """A `.git` folder holding `HEAD`, or a `.git` file beginning
+    `gitdir: `, as a worktree and a submodule carry."""
+    try:
+        if marker.is_dir():
+            return (marker / "HEAD").is_file()
+        with marker.open("rb") as stream:
+            return stream.read(8) == b"gitdir: "
+    except OSError:
+        return False
+
+
+def _holds_rulebook(folder: Path) -> bool:
+    """Whether `folder/docs/spec.md` is a RadialRig rulebook (SPEC-1)."""
+    try:
+        text = (folder / "docs" / "spec.md").read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
+    fm, _ = parse_frontmatter(text.removeprefix("\ufeff"))
+    return bool(fm) and fm.get("id") == "SPEC-1"
+
+
+def _refuse_inside(root: Path) -> None:
+    """Raise InsideMountedProject when `root` sits inside a mounted project."""
+    parent = mounted_ancestor(root)
+    if parent is not None:
+        raise InsideMountedProject(root, parent)
 
 
 def read_manifest(root: Path) -> dict:
@@ -1872,6 +1974,7 @@ def mount_plan(
     root = root.resolve()
     if is_mounted(root):
         raise AlreadyMounted(root)
+    _refuse_inside(root)
     scope = scope or default_scope(root)
     day = (today or dt.date.today()).isoformat()
     try:
@@ -1900,6 +2003,7 @@ def mount(
     root = root.resolve()
     if is_mounted(root):
         raise AlreadyMounted(root)
+    _refuse_inside(root)
 
     scope = scope or default_scope(root)
     day = (today or dt.date.today()).isoformat()
