@@ -6,8 +6,8 @@ status: in-force
 grade: decided
 owner: thejug923
 scope: RadialRig
-effective: 2026-09-05
-last-verified: 2026-10-22
+effective: 2026-11-01
+last-verified: 2026-11-01
 supersedes: none
 replaced-by: none
 depends-on: D-03, D-05, D-06, D-13, D-35
@@ -42,8 +42,8 @@ must:
 3. Be **atomic across files**. `amend_ruling` touches at least two paths.
    Either every path lands or none does. A half-applied change is a
    corpus defect, not a partial success.
-4. **Stop at the working tree.** No verb writes git — the two permitted
-   reads are named in SPEC-3 section 1. A person approves the ruling
+4. **Stop at the working tree.** No verb writes git — the reads a verb
+   may make are named in SPEC-3 section 1. A person approves the ruling
    and a person commits; an agent reads the diff
    (D-35 commitment 2).
 5. Take the **whole file text from the caller**. The tool validates and

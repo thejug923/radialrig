@@ -6,8 +6,8 @@ status: in-force
 grade: decided
 owner: thejug923
 scope: RadialRig
-effective: 2026-10-22
-last-verified: 2026-10-22
+effective: 2026-11-01
+last-verified: 2026-11-01
 supersedes: none
 replaced-by: none
 depends-on: D-06, D-09, D-18, D-19, D-21, D-22, D-23, D-35
@@ -53,10 +53,11 @@ what it adds.
 3. **All paths or none.** A verb touching several files either lands
    every one or writes nothing (constraint 3).
 4. **The write stops at the working tree.** No verb writes git: none
-   stages, commits, moves HEAD or reverts. Two reads are allowed and
-   named — the C5 baseline (section 3) and the archive entry's
-   `last-verified` (section 4.1). An agent reads the diff; a person
-   commits. Reversal is `git checkout -- docs/` (constraint 4).
+   stages, commits, moves HEAD or reverts. Three reads are allowed
+   and named — the C5 baseline (section 3), the archive entry's
+   `last-verified` (section 4.1), and the ids other branches hold
+   (sections 5 and 6). An agent reads the diff; a person commits.
+   Reversal is `git checkout -- docs/` (constraint 4).
 5. **No verb deletes a record, and no verb changes an `id`**
    ([D-06](decisions/D-06-stable-identifiers.md), constraint 1).
 6. **Every verb takes a required `summary`** — one plain sentence saying
@@ -194,8 +195,9 @@ enforces the fence line and the placement, and nothing enforces the tense
 question left scope.
 
 **With `successor`** the question passes to a new record (SPEC-1 8.3).
-The verb writes the successor under its new `id` and requires the retired
-record's `replaced-by` to name it. The two files land together or not at
+The verb writes the successor under its new `id`, which takes the test
+section 6 sets for a proposal, and requires the retired record's
+`replaced-by` to name it. The two files land together or not at
 all: a half-written 8.3 is the contradictory state
 [D-09](decisions/D-09-conflict-stop-rule.md) stops on.
 
@@ -216,6 +218,23 @@ wider rule SPEC-1 section 8 states: at most one file holds a given `id`,
 and an id is never reused
 ([D-06](decisions/D-06-stable-identifiers.md)). A reused id returns
 `error` naming the file that holds it.
+
+**No governed file on another branch may hold it either.** Two lines
+of work that each take the next free `id` collide when they merge,
+and neither working tree shows the other's record. So the verb also
+reads every local branch and every remote-tracking branch, the
+remote ones as the last fetch left them; it fetches no branch. In a
+partial clone git downloads the contents it lacks under `docs/` in
+order to search them, so there the search needs the remote. A file
+there counts when the checks would read it as a record
+([SPEC-1](spec.md) section 2) and its frontmatter, parsed as the
+checks parse it, carries the `id`. The file at the very path being
+written is the same file, not a second holder: that is how a
+committed record whose bytes no longer decode is repaired in place.
+A held id returns `error` naming the branch and the file. Tags and
+other refs that are not branches are not read. A search that fails
+returns `error` and writes nothing, so a failure never reads as a
+free id.
 
 ## 7. Result shapes
 

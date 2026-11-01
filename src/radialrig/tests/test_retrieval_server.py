@@ -9,12 +9,18 @@ ruling -> abstention, archive reachable only via search_history.
 
 from __future__ import annotations
 
+import datetime as dt
 import subprocess
 from pathlib import Path
 
 import pytest
 
 from radialrig import retrieval_server as rs
+
+# check_docs runs C6 against the real date. A fixed fixture date went
+# stale 90 days on and turned two C5 tests red on 2026-10-31, so the
+# fixture is checked today and never ages.
+FRESH = dt.date.today().isoformat()
 
 
 def record_text(
@@ -30,7 +36,7 @@ def record_text(
     return (
         f"---\nid: {rid}\ntitle: {title}\ntype: decision\nstatus: {status}\n"
         f"grade: decided\nowner: tester\nscope: {scope}\n"
-        "effective: 2026-08-01\nlast-verified: 2026-08-01\n"
+        f"effective: 2026-08-01\nlast-verified: {FRESH}\n"
         f"supersedes: none\nreplaced-by: none\ndepends-on: none\n---\n\n{first}\n\n{body}\n"
     )
 

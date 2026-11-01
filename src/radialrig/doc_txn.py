@@ -99,12 +99,13 @@ Result = Applied | Rejected | TxnError
 
 # --- Path rules --------------------------------------------------------
 
-def _is_governed_path(rel: str) -> bool:
+def is_governed_path(rel: str) -> bool:
     """True when the validator would see a file at this path.
 
     A write the validator cannot see is an ungoverned write wearing a
     governed path, so the transaction refuses one rather than landing a
-    file no check will ever read.
+    file no check will ever read. The authoring server asks the same
+    question of a file another branch holds (SPEC-3 section 6).
     """
     if rel.startswith(f"{DOCS}/spec") and rel.endswith(".md") and "/" not in rel[5:]:
         return True
@@ -129,7 +130,7 @@ def _check_paths(root: Path, ops: Sequence[Op]) -> str | None:
                 return f"path '{rel}' is not a clean root-relative posix path"
             if ".." in Path(rel).parts:
                 return f"path '{rel}' escapes the corpus root"
-            if not _is_governed_path(rel):
+            if not is_governed_path(rel):
                 return f"path '{rel}' is outside the governed layout"
         if isinstance(op, Write):
             targets.append(op.path)

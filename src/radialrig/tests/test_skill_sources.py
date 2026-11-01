@@ -464,7 +464,7 @@ def test_the_skill_stays_inside_the_pinned_budget(skills_dir, skill):
 # skills mediated in this release, each carrying the major bump its
 # rewrite earned.
 PINNED_VERSIONS: tuple[tuple[str, str], ...] = (
-    ("plan-review", "2.1.0"),
+    ("plan-review", "3.0.0"),
     ("promotion-gate", "3.1.0"),
     ("toolkit-standards", "3.2.0"),
     ("memory-keeper", "1.0.0"),
@@ -538,6 +538,45 @@ def test_no_gate_skill_byte_documents_disabling_host_protection(skills_dir):
                 offences.append(f"{rel} shows a host-API call that is not the "
                                 f"enable direction: {line.strip()[:70]}")
     assert offences == []
+
+
+# --- plan-review: a review with a stated scope that stops -------------
+
+# A review asked to look for problems finds ever more of them, and each
+# round's fixes grow the plan. The skill therefore states the review's
+# scope, has anything outside it listed rather than examined, fixes only
+# what would make the result wrong, and stops after two rounds, the
+# second checking the first round's fixes. Stated as a pair, like the
+# gate skill's posture: the scoped rules must be present, and the
+# open-ended ones they replaced must be gone.
+PLAN_SKILL = "plan-review"
+PLAN_SCOPED_RULES = (
+    "outside the scope",
+    "tested, rated, or given a suggested fix",
+    "never asks the agent to look for problems",
+    "would make the result wrong",
+    "Two rounds, then stop",
+    "does not look for new problems",
+)
+PLAN_OPEN_ENDED_RULES = (
+    "then sweep",
+    "Two dry rounds",
+    "full depth",
+)
+
+
+def test_the_plan_skill_states_its_scope_and_stops_after_two_rounds(
+    skills_dir,
+):
+    body = flowed(document(skills_dir, PLAN_SKILL))
+    for phrase in PLAN_SCOPED_RULES:
+        assert phrase in body, phrase
+
+
+def test_the_plan_skill_drops_the_open_ended_round_rules(skills_dir):
+    body = flowed(document(skills_dir, PLAN_SKILL))
+    for phrase in PLAN_OPEN_ENDED_RULES:
+        assert phrase not in body, phrase
 
 
 # --- session-handoff: the version and the footer ----------------------

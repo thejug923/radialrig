@@ -141,7 +141,7 @@ SKILL_CATALOG: tuple[SkillEntry, ...] = (
     ),
     SkillEntry(
         name="plan-review",
-        version="2.1.0",
+        version="3.0.0",
         summary="Reviews a plan as a plan: files its absences, never fills them.",
         files=("SKILL.md",),
     ),
