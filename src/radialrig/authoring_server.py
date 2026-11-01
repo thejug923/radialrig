@@ -14,8 +14,8 @@ command so it can come back.
 
 Run standalone:  radialrig-write
 
-Every verb stops at the working tree. No verb writes git; the two
-permitted reads are named in SPEC-3 section 1. Every verb takes a
+Every verb stops at the working tree. No verb writes git; the reads
+a verb may make are named in SPEC-3 section 1. Every verb takes a
 `summary`, one plain sentence saying what the ruling now says, and
 echoes it back in the applied result. The agent shows that sentence to
 the person and reads the diff, and nothing is committed until the person
@@ -31,8 +31,10 @@ one is a diff a person sees before any commit (D-18, Why).
 from __future__ import annotations
 
 import datetime as dt
+import os
 import re
 import string
+import subprocess
 from dataclasses import asdict
 from typing import Annotated, Literal
 
@@ -51,7 +53,7 @@ from radialrig.mount import installed_version
 
 # Re-exported so existing callers keep reaching the resolver here.
 from radialrig.paths import resolve_root
-from radialrig.validate_docs import git_head_frontmatter
+from radialrig.validate_docs import git_head_frontmatter, under_git
 
 ARCHIVE_DIR = "docs/archive"
 
@@ -347,23 +349,188 @@ def _propagation_ops(entries: list[dict] | None) -> tuple[list[txn.Write], str |
     return ops, None
 
 
+# --- Ids other branches hold (SPEC-3 section 6) -------------------------
+
+# The refs the id check reads: every local branch and every
+# remote-tracking branch. Tags, the stash and the snapshot refs some tools
+# keep under refs/ are not lines of work, so an id they alone hold is free.
+BRANCH_REFS = ("refs/heads", "refs/remotes")
+
+# Characters of ref names per `git grep`. Windows caps a whole command
+# line near 32,767 characters, and one ref name can run to hundreds.
+REF_CHARS_PER_GREP = 16000
+
+
+def _ref_batches(refs: list[str], budget: int) -> list[list[str]]:
+    """`refs` in order, cut into runs whose names fit `budget` characters
+    with one separator each. A name longer than the budget runs alone."""
+    batches: list[list[str]] = []
+    batch: list[str] = []
+    size = 0
+    for ref in refs:
+        cost = len(ref) + 1
+        if batch and size + cost > budget:
+            batches.append(batch)
+            batch, size = [], 0
+        batch.append(ref)
+        size += cost
+    if batch:
+        batches.append(batch)
+    return batches
+
+
+def _as_validator_sees(rel: str) -> str:
+    """`rel` as the validator compares it here: `governed_files` globs
+    `*.md` without regard to case on Windows and with it elsewhere."""
+    return rel.lower() if os.name == "nt" else rel
+
+
+def _git_run(*args: str) -> subprocess.CompletedProcess | None:
+    """One git command at the corpus root, or None when it cannot run:
+    git will not start, or an argument cannot reach a command line (an id
+    holding a NUL raises ValueError in subprocess).
+
+    Every call made through here reads: none stages, commits, moves a ref
+    or touches the working tree (SPEC-3 section 1, guarantee 4). In a
+    partial clone git downloads the objects a search lacks into its own
+    store (SPEC-3 section 6).
+    """
+    try:
+        return subprocess.run(["git", *args], cwd=ROOT, capture_output=True)
+    except (OSError, ValueError):
+        return None
+
+
+def _ere(text: str) -> str:
+    """`text` as a POSIX extended regular expression that matches itself."""
+    return re.sub(r"([.\[\]()*+?{}|^$\\])", r"\\\1", text)
+
+
+def _branch_name(ref: str) -> str:
+    for prefix in ("refs/heads/", "refs/remotes/"):
+        if ref.startswith(prefix):
+            return ref[len(prefix):]
+    return ref
+
+
+def _unsearchable(rid: str, run: subprocess.CompletedProcess | None) -> str:
+    """The refusal when the other branches cannot be read."""
+    said = "git could not run the search"
+    if run is not None:
+        lines = run.stderr.decode("utf-8", "replace").strip().splitlines()
+        said = lines[-1] if lines else f"git exited {run.returncode}"
+    return (
+        f"could not search the other branches for id '{rid}' ({said}), so "
+        "another branch may already hold it. Nothing was written. Fix what "
+        "git reports and try again."
+    )
+
+
+def _id_on_a_branch(rid: str, own_path: str) -> str | None:
+    """The refusal for an id a governed file holds on any branch, or None.
+
+    Two lines of work that each take the next free id collide when they
+    merge, and neither working tree shows the other's record (issue #72).
+    So the verb reads every branch the repository knows, the remote ones
+    as the last fetch left them; it fetches no branch. In a partial clone
+    git downloads the file contents it lacks to search them, so there the
+    search needs the remote, and without it the verb refuses.
+
+    `git grep` keeps the search cheap: it lists the files with a line that
+    opens `id:` and holds `rid` anywhere after, read as text whatever the
+    repository's attributes say. The parser decides: a file counts only
+    when the validator would collect it and its frontmatter, parsed as the
+    validator parses it, carries that id, so quoting and whitespace the
+    parser accepts cannot hide a holder. The search runs at the corpus
+    root, so a corpus below the repository root reads its own folder on
+    each branch.
+
+    A file at `own_path`, the path being written, is that same file and
+    not a second holder: a committed record whose bytes no longer decode
+    is repaired by a write at its own path, and every branch carries it
+    there.
+
+    A folder git does not answer for has no branches to read; the
+    transaction refuses it anyway, for want of a C5 baseline (SPEC-3
+    section 3). A search that fails is refused, never read as one that
+    found nothing.
+    """
+    listing = _git_run("for-each-ref", "--format=%(refname)%00%(symref)", *BRANCH_REFS)
+    if listing is None or listing.returncode != 0:
+        return _unsearchable(rid, listing) if under_git(ROOT) else None
+    refs = []
+    for line in listing.stdout.decode("utf-8", "replace").splitlines():
+        name, _, symref = line.partition("\0")
+        if name and not symref:  # origin/HEAD names a branch already listed
+            refs.append(name)
+
+    pattern = f"^id:.*{_ere(rid)}"
+    own = _as_validator_sees(own_path)
+    for chunk in _ref_batches(refs, REF_CHARS_PER_GREP):
+        # A person's git config must not reshape the output: color codes
+        # would wrap each name, and fullName would print paths from the
+        # repository root instead of the corpus root. --text reads a file
+        # an attribute calls binary, as the validator does.
+        found = _git_run(
+            "-c", "grep.fullName=false", "grep", "--no-color", "--text", "-l",
+            "-z", "-E", "-e", pattern, *chunk, "--", "docs",
+        )
+        if found is not None and found.returncode == 1:
+            continue  # git grep's "no match"
+        if found is None or found.returncode != 0:
+            return _unsearchable(rid, found)
+        for hit in found.stdout.decode("utf-8", "replace").split("\0"):
+            ref, _, rel = hit.partition(":")  # a ref name never holds ':'
+            seen = _as_validator_sees(rel)
+            if not rel or seen == own or not txn.is_governed_path(seen):
+                continue
+            blob = _git_run("show", f"{ref}:./{rel}")
+            if blob is None or blob.returncode != 0:
+                return _unsearchable(rid, blob)
+            held, _ = parse_frontmatter(blob.stdout.decode("utf-8", "replace"))
+            if (held or {}).get("id") == rid:
+                return (
+                    f"id '{rid}' is already held by {rel} on branch "
+                    f"'{_branch_name(ref)}'. An id is never reused, on any "
+                    "branch (D-06): the two records would collide when the "
+                    "branches merge. Use a new id. Other branches are read "
+                    "as the last fetch left them."
+                )
+    return None
+
+
+def _id_taken(rid: str, path: str) -> str | None:
+    """The refusal for a new record's id that a file already holds, or None.
+
+    A new record is a proposal (SPEC-1 8.4) or a retirement's successor
+    (8.3 step 1), and both take one test (SPEC-3 sections 5 and 6): no file
+    in the corpus holds the id, in force or archived, and no governed file
+    on another branch does, other than the file at `path` itself. C1 sees
+    in-force duplicates only.
+    """
+    for record in load_records(ROOT):
+        if record.id == rid:
+            return (
+                f"id '{rid}' is already held by {record.rel}. An id is never "
+                "reused (D-06). Use a new id, or amend that record."
+            )
+    return _id_on_a_branch(rid, path)
+
+
 # --- Server ------------------------------------------------------------
 
 def propose_record(path: NonEmpty, text: NonEmpty, summary: Summary) -> dict:
     """Add a record under a new id (SPEC-1 8.4). Whole file text.
 
-    Rejects an id any file already holds, in force or archived.
+    Rejects an id any file already holds, in force or archived, on this
+    branch or any other.
     """
     fm, _ = parse_frontmatter(text)
     if fm is None or not fm.get("id"):
         return _error("text has no parseable frontmatter with an id")
-    rid = fm["id"]
-    for record in load_records(ROOT):
-        if record.id == rid:
-            return _error(
-                f"id '{rid}' is already held by {record.rel}. An id is never "
-                "reused (D-06). Use a new id, or amend that record."
-            )
+    held = _id_taken(fm["id"], path)
+    if held:
+        return _error(held)
     taken = _path_taken(path)
     if taken:
         return _error(taken)
@@ -449,8 +616,9 @@ def retire_ruling(
 ) -> dict:
     """Move a record to docs/archive/, past tense (SPEC-1 8.2, 8.3).
 
-    successor {path, text}: the new record taking the question (8.3).
-    Both files land together or neither does.
+    successor {path, text}: the new record taking the question (8.3),
+    under an id no file holds on any branch. Both files land together or
+    neither does.
     """
     record = _live_record(id)
     if record is None:
@@ -483,6 +651,9 @@ def retire_ruling(
                 f"the retired record must set replaced-by to '{new_id}' "
                 "(SPEC-1 8.3 step 2)"
             )
+        held = _id_taken(new_id, successor["path"])
+        if held:
+            return _error(held)
         taken = _path_taken(successor["path"])
         if taken:
             return _error(taken)

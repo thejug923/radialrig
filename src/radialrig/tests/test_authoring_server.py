@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import os
 import subprocess
 from pathlib import Path
 
@@ -182,6 +183,230 @@ def test_propose_record_refuses_a_path_a_decodable_file_holds(corpus):
     assert committed["kind"] == "error", committed
     assert "docs/decisions/D-90-test.md" in committed["message"]
     assert blobs(corpus) == before
+
+
+# --- propose_record: ids other branches hold (SPEC-3 section 6) ---------
+#
+# Two lines of work that each take the next free id collide when they
+# merge (RadialRig issue #72). The verb reads every local and
+# remote-tracking branch, as the last fetch left them, and refuses an id a
+# governed file holds on any of them.
+
+def on_branch(root: Path, branch: str, files: dict[str, str]) -> None:
+    """Commit `files` on a new branch cut from master, then return to
+    master, so the working tree no longer holds them."""
+    git(root, "switch", "-q", "-c", branch)
+    for rel, text in files.items():
+        write(root, rel, text)
+    git(root, "add", "-A")
+    git(root, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", branch)
+    git(root, "switch", "-q", "master")
+
+
+@pytest.mark.parametrize("rel, text", [
+    ("docs/decisions/D-92-lane.md", record(rid="D-92")),
+    ("docs/decisions/lane/D-92-lane.md", record(rid="D-92")),
+    ("docs/archive/D-92-old.md", archived_text("D-92")),
+    ("docs/decisions/D-92-quoted.md", record(rid="D-92").replace("id: D-92", 'id: "D-92"')),
+    # parse_frontmatter strips every surrounding quote, so the search must too
+    ("docs/decisions/D-92-quoted2.md", record(rid="D-92").replace("id: D-92", 'id: ""D-92""')),
+    # ... and any whitespace str.strip() knows, a no-break space included
+    ("docs/decisions/D-92-nbsp.md", record(rid="D-92").replace("id: D-92", "id: D-92 ")),
+], ids=["in-force", "area-subfolder", "archived", "quoted-id", "quoted-twice", "no-break-space"])
+def test_propose_record_refuses_an_id_another_branch_holds(corpus, rel, text):
+    on_branch(corpus, "lane-a", {rel: text})
+    before = isolation(corpus)
+    files = blobs(corpus)
+
+    out = a.propose_record("docs/decisions/D-92-new.md", record(rid="D-92"), S)
+
+    assert out["kind"] == "error", out
+    assert "lane-a" in out["message"] and rel in out["message"]
+    assert "never reused" in out["message"]
+    assert blobs(corpus) == files, "a refused proposal moved a byte"
+    assert isolation(corpus) == before, "a verb touched git"
+    assert git(corpus, "branch", "--show-current") == "master"
+
+
+def test_propose_record_refuses_an_id_a_remote_tracking_branch_holds(corpus):
+    """A branch another clone pushed is seen through its remote-tracking
+    ref, as the last fetch left it."""
+    on_branch(corpus, "lane-b", {"docs/plans/PLAN-0007-lane.md": record(rid="PLAN-0007")})
+    git(corpus, "update-ref", "refs/remotes/origin/lane-b", "lane-b")
+    git(corpus, "branch", "-q", "-D", "lane-b")
+    # origin/HEAD only names another branch; the refusal names that branch.
+    git(corpus, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/lane-b")
+
+    out = a.propose_record("docs/plans/PLAN-0007-new.md", record(rid="PLAN-0007"), S)
+
+    assert out["kind"] == "error", out
+    assert "origin/lane-b" in out["message"]
+    assert "origin/HEAD" not in out["message"]
+    assert "docs/plans/PLAN-0007-lane.md" in out["message"]
+
+
+def test_propose_record_reads_markdown_a_repository_marks_binary(corpus):
+    """A `binary` attribute changes how git shows a file, not whether the
+    validator reads it as a record."""
+    write(corpus, ".gitattributes", "*.md binary\n")
+    git(corpus, "add", ".gitattributes")
+    git(corpus, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "attrs")
+    on_branch(corpus, "lane-a", {"docs/decisions/D-92-lane.md": record(rid="D-92")})
+    assert (corpus / ".gitattributes").is_file()
+
+    out = a.propose_record("docs/decisions/D-92-new.md", record(rid="D-92"), S)
+
+    assert out["kind"] == "error", out
+    assert "docs/decisions/D-92-lane.md" in out["message"]
+
+
+def test_propose_record_reads_record_files_the_way_the_validator_does(corpus):
+    """The validator collects `*.md` without regard to case on Windows and
+    with it on Linux, so a `.MD` record counts on Windows only."""
+    on_branch(corpus, "lane-a", {"docs/decisions/D-92-held.MD": record(rid="D-92")})
+
+    out = a.propose_record("docs/decisions/D-92-new.md", record(rid="D-92"), S)
+
+    if os.name == "nt":
+        assert out["kind"] == "error", out
+        assert "D-92-held.MD" in out["message"]
+    else:
+        assert out["kind"] == "applied", out
+
+
+def test_a_committed_record_whose_bytes_broke_is_repaired_at_its_own_path(corpus):
+    """The repair above, on a record git already holds. Every branch
+    carries that record at the very path being written: the same file,
+    not a second holder of the id (2026-11-01 review)."""
+    git(corpus, "branch", "lane-a")
+    rel = "docs/decisions/D-90-test.md"
+    (corpus / rel).write_bytes(record().replace("Test.", "Café.").encode("cp1252"))
+
+    out = a.propose_record(rel, record(), S)
+
+    assert out["kind"] == "applied", out
+    assert fm(corpus, rel)["id"] == "D-90"
+
+
+def test_branch_batches_keep_each_command_line_short():
+    """Ref names vary in length, so batches are bounded by characters,
+    not by count. A name longer than the budget goes alone."""
+    refs = [f"refs/heads/{'x' * n}" for n in (10, 700, 700, 5, 3000, 1)]
+    batches = a._ref_batches(refs, 1000)
+    assert [r for batch in batches for r in batch] == refs
+    for batch in batches:
+        assert len(batch) == 1 or sum(len(r) + 1 for r in batch) <= 1000
+
+
+def test_propose_record_reads_every_batch_of_branches(corpus, monkeypatch):
+    """Branches are searched in batches to keep each command line short;
+    an id on a branch past the first batch is still found."""
+    monkeypatch.setattr(a, "REF_CHARS_PER_GREP", 1, raising=False)
+    on_branch(corpus, "lane-a", {"docs/decisions/D-95-a.md": record(rid="D-95")})
+    on_branch(corpus, "lane-z", {"docs/decisions/D-92-z.md": record(rid="D-92")})
+
+    out = a.propose_record("docs/decisions/D-92-new.md", record(rid="D-92"), S)
+
+    assert out["kind"] == "error", out
+    assert "lane-z" in out["message"]
+
+
+def test_propose_record_answers_an_id_git_cannot_take(corpus):
+    """A NUL in an id cannot reach a command line. The verb says so in its
+    own words rather than raising out of the tool."""
+    files = blobs(corpus)
+    out = a.propose_record("docs/decisions/D-92-new.md", record(rid="D-9\x002"), S)
+    assert out["kind"] == "error", out
+    assert blobs(corpus) == files
+
+
+def test_propose_record_reads_only_the_id_in_frontmatter_on_other_branches(corpus):
+    """A body line that happens to read `id: D-92`, such as a fenced
+    example, holds no id."""
+    example = record(
+        rid="D-95",
+        tail="\n## Example\n\n```\n---\nid: D-92\n---\n```\n",
+    )
+    on_branch(corpus, "lane-a", {"docs/decisions/D-95-example.md": example})
+
+    out = a.propose_record("docs/decisions/D-92-new.md", record(rid="D-92"), S)
+    assert out["kind"] == "applied", out
+
+
+def test_propose_record_ignores_files_outside_the_governed_layout_on_other_branches(corpus):
+    """A file the validator never reads, such as working notes or a
+    template, holds no id, here or on another branch."""
+    on_branch(corpus, "lane-a", {
+        "docs/planning/D-92-notes.md": record(rid="D-92"),
+        "docs/templates/decision.md": record(rid="D-92"),
+    })
+
+    out = a.propose_record("docs/decisions/D-92-new.md", record(rid="D-92"), S)
+    assert out["kind"] == "applied", out
+
+
+def test_propose_record_reads_branches_only(corpus):
+    """Tags and the snapshot refs some tools keep under refs/ are not
+    lines of work, so an id they alone hold is free."""
+    on_branch(corpus, "snap", {"docs/decisions/D-92-snap.md": record(rid="D-92")})
+    git(corpus, "update-ref", "refs/t3/checkpoints/one", "snap")
+    git(corpus, "tag", "v0", "snap")
+    git(corpus, "branch", "-q", "-D", "snap")
+
+    out = a.propose_record("docs/decisions/D-92-new.md", record(rid="D-92"), S)
+    assert out["kind"] == "applied", out
+
+
+def test_propose_record_reads_other_branches_within_its_own_corpus(tmp_path, monkeypatch):
+    """A corpus below the repository root reads its own folder on each
+    branch. A record under another folder belongs to another corpus. A
+    person's git config does not move the paths or wrap them in color."""
+    proj = tmp_path / "apps" / "web"
+    write(proj, "docs/decisions/D-90-test.md", record())
+    for args in (
+        ["init", "-q", "-b", "master"], ["add", "-A"],
+        ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "seed"],
+    ):
+        git(tmp_path, *args)
+    on_branch(tmp_path, "lane-a", {
+        "apps/web/docs/decisions/D-92-lane.md": record(rid="D-92"),
+        "docs/decisions/D-93-elsewhere.md": record(rid="D-93"),
+    })
+    git(tmp_path, "config", "grep.fullName", "true")
+    git(tmp_path, "config", "color.grep", "always")
+    monkeypatch.setattr(a, "ROOT", proj)
+    monkeypatch.setattr(a, "TODAY", TODAY)
+
+    held = a.propose_record("docs/decisions/D-92-new.md", record(rid="D-92"), S)
+    assert held["kind"] == "error", held
+    assert "docs/decisions/D-92-lane.md" in held["message"]
+
+    free = a.propose_record("docs/decisions/D-93-new.md", record(rid="D-93"), S)
+    assert free["kind"] == "applied", free
+
+
+@pytest.mark.parametrize("step", ["for-each-ref", "grep", "show"])
+def test_propose_record_writes_nothing_when_other_branches_cannot_be_read(
+    corpus, monkeypatch, step,
+):
+    """A search that fails is not a search that found nothing, at any of
+    its three steps: listing the branches, searching them, reading a hit."""
+    on_branch(corpus, "lane-a", {"docs/decisions/D-92-lane.md": record(rid="D-92")})
+    real = a._git_run
+
+    def failing(*args):
+        if step in args:
+            return subprocess.CompletedProcess(["git", *args], 128, b"", b"fatal: boom")
+        return real(*args)
+
+    monkeypatch.setattr(a, "_git_run", failing)
+    files = blobs(corpus)
+
+    out = a.propose_record("docs/decisions/D-92-new.md", record(rid="D-92"), S)
+
+    assert out["kind"] == "error", out
+    assert "boom" in out["message"]
+    assert blobs(corpus) == files
 
 
 # --- amend_ruling, position mode (SPEC-1 8.1) --------------------------
@@ -800,6 +1025,44 @@ def test_a_successor_never_lands_on_an_uncommitted_file(corpus):
     assert blobs(corpus) == before, "a refused successor moved a byte"
     assert fm(corpus, proposal)["id"] == "D-92"
     assert (corpus / "docs/decisions/D-90-test.md").is_file()
+
+
+# A successor is a new record (SPEC-1 8.3 step 1), so its id takes the test
+# a proposal's takes (SPEC-3 sections 5 and 6): no file here, and no
+# governed file on another branch, may hold it. The 2026-11-01 review
+# found the successor tested only against the id it replaces.
+
+def retire_to(rid: str) -> dict:
+    return a.retire_ruling(
+        id="D-90", text=archived_text("D-90", replaced_by=rid), summary=S,
+        successor={
+            "path": f"docs/decisions/{rid}-successor.md",
+            "text": record(rid=rid, ruling="The successor rules."),
+        },
+        propagate=[dep_entry()],
+    )
+
+
+def test_a_successor_may_not_take_an_id_an_archived_file_holds(corpus):
+    write(corpus, "docs/archive/D-70-old.md", archived_text("D-70"))
+    before = blobs(corpus)
+
+    out = retire_to("D-70")
+
+    assert out["kind"] == "error", out
+    assert "docs/archive/D-70-old.md" in out["message"]
+    assert blobs(corpus) == before, "a refused successor moved a byte"
+
+
+def test_a_successor_may_not_take_an_id_another_branch_holds(corpus):
+    on_branch(corpus, "lane-a", {"docs/decisions/D-92-lane.md": record(rid="D-92")})
+    before = blobs(corpus)
+
+    out = retire_to("D-92")
+
+    assert out["kind"] == "error", out
+    assert "lane-a" in out["message"] and "docs/decisions/D-92-lane.md" in out["message"]
+    assert blobs(corpus) == before, "a refused successor moved a byte"
 
 
 # --- The summary (PLAN-0012 phase 2, D-35 commitment 2) ----------------
