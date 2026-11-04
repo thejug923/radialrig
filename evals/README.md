@@ -191,3 +191,36 @@ had the two cases there were then, n=5, one session at a time. It cost
 $4.20 with its canary and took about eight minutes. The end-of-session
 case came later; alone, at n=5, it cost $3.06 with its canary and took
 about nine minutes. The default now runs all three cases.
+
+## Toolkit-standards: what we measured
+
+We tested whether the toolkit-standards skill helps an agent or gets in its
+way, and the results took it from version 3.2.0 to 4.0.0. The bench and its
+records stay in the private workshop, so this section is only an overview.
+
+Each test was a small throwaway project and one prompt, run in fresh sessions
+with the skill absent, installed and left to the agent, or with the agent told
+to load it. Two models graded each session blind, against a rubric written
+before its sessions ran. About 300 sessions ran version 3.2.0 on Claude Opus,
+Sonnet and Haiku. On GPT-6.1 Sol through Codex, 30 sessions ran 3.2.0 and 34
+ran shorter versions. Opus then ran 4.0.0 in eight more.
+
+What it found:
+
+- The table of default tools added nothing. Without the skill, every model
+  chose Python, uv, pytest and Ruff for a new project.
+- Version 3.2.0 made sessions longer on every model on average. On GPT it used
+  two to three times the tokens on two of five tasks, and it told a mixed
+  Windows and Mac team to run a plain Python script through uv.
+- One rule helped. When a project's own tool was missing, 5 of
+  5 GPT sessions with 4.0.0 said what was missing and let the person choose,
+  whether told to load the skill or not, against 0 of 5 without it. Without the
+  skill, agents tried a workaround first, though they reported honestly what
+  they had done.
+- On Opus, 4.0.0 did no harm at about the same cost. Opus did the right thing on
+  those tasks without the skill as well.
+
+The limits: two to five sessions per setup, one-prompt tasks, and one PC. The
+GPT sessions carried the owner's personal Codex instructions. Sonnet and Haiku
+haven't run 4.0.0. On GPT, replies still name the skill when it loads unprompted,
+and agents did less on a switch to a package manager that wasn't installed.

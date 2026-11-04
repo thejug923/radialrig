@@ -47,7 +47,6 @@ EXPECTED_SKILL_SOURCES = {
     "session-handoff/SKILL.md",
     "session-handoff/scripts/handoff.py",
     "toolkit-standards/SKILL.md",
-    "toolkit-standards/reference/languages.md",
 }
 SKILLS_README = "README.txt"
 

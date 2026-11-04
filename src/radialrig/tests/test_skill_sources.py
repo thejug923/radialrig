@@ -466,7 +466,7 @@ def test_the_skill_stays_inside_the_pinned_budget(skills_dir, skill):
 PINNED_VERSIONS: tuple[tuple[str, str], ...] = (
     ("plan-review", "3.0.0"),
     ("promotion-gate", "3.1.0"),
-    ("toolkit-standards", "3.2.0"),
+    ("toolkit-standards", "4.0.0"),
     ("memory-keeper", "1.0.0"),
 )
 
