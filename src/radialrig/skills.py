@@ -153,9 +153,9 @@ SKILL_CATALOG: tuple[SkillEntry, ...] = (
     ),
     SkillEntry(
         name="toolkit-standards",
-        version="3.2.0",
-        summary="Tool precedence: repo convention, pinned default, declared gap.",
-        files=("SKILL.md", "reference/languages.md"),
+        version="4.0.0",
+        summary="When a project's own tool is missing: say so and let the person choose.",
+        files=("SKILL.md",),
     ),
     SkillEntry(
         name="memory-keeper",
