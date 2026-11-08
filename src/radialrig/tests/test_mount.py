@@ -707,6 +707,50 @@ def test_seeded_text_cites_no_absent_record(host):
             assert (path.parent / target).exists(), f"{rel}: link target '{target}' is dead"
 
 
+def test_the_plan_template_asks_what_only_the_owner_can_do_and_what_backs_each_claim(host):
+    # The plan template has a place for each step only the owner can take,
+    # right after the objective; one for what backs each claim the plan
+    # rests on; and a list every revision re-checks. Each done-condition
+    # says what running its check takes. Checked on the mounted file, the
+    # one a project's agent copies when it writes a plan.
+    mnt.mount(host, today=MOUNT_DAY)
+    text = (host / "docs/templates/plan.md").read_text(encoding="utf-8")
+    headings = re.findall(r"^## (.+)$", text, flags=re.M)
+    assert headings == [
+        "Objective",
+        "What this asks of the owner",
+        "What this plan rests on",
+        "What must stay true",
+        "Phase 1 — NAME",
+        "Execution log",
+    ]
+    bodies = re.split(r"^## .+$", text, flags=re.M)[1:]
+    section = {h: " ".join(b.split()) for h, b in zip(headings, bodies)}
+
+    assert ("Each decision or step only the owner can take, and where in the plan it falls"
+            in section["What this asks of the owner"])
+    assert 'Write "Nothing" when the plan needs none.' in section["What this asks of the owner"]
+
+    rests_on = bodies[headings.index("What this plan rests on")]
+    assert re.findall(r"^- \*\*(\w+):\*\*", rests_on, flags=re.M) == [
+        "Decided", "Verified", "Assumed",
+    ]
+    assert "A statement with nothing behind it is an assumption" in section["What this plan rests on"]
+    assert "and the smallest check that would settle it" in section["What this plan rests on"]
+
+    stay_true = bodies[headings.index("What must stay true")]
+    assert "every revision of this plan re-checks all of them" in section["What must stay true"]
+    assert re.findall(r"^(\d+)\. ", stay_true, flags=re.M) == ["1", "2", "3"]
+    # The two items it kept from the constraints list it replaced.
+    assert "The rulings this plan may not contradict, each named by key." in section["What must stay true"]
+    assert ("Every phase ends with evidence in the execution log: command output, "
+            "test counts, or a diff") in section["What must stay true"]
+    assert "What a fix elsewhere in this plan could quietly break" in section["What must stay true"]
+
+    assert ("and what running that check takes: where it runs, any wait, "
+            "and any step only a person can take.") in section["Phase 1 — NAME"]
+
+
 def test_route_map_section_stays_within_the_budget(host):
     mnt.mount(host, today=MOUNT_DAY)
     text = (host / "AGENTS.md").read_text(encoding="utf-8")

@@ -1,6 +1,6 @@
 [project]
 name = "radialrig"
-version = "0.1.22"
+version = "0.1.23"
 description = "Governed-record retrieval, authoring, and validation tools that mount onto an existing project."
 license = "MIT"
 license-files = ["LICENSE"]
