@@ -965,6 +965,40 @@ def test_the_client_label_is_read_from_the_table_at_render_time(monkeypatch):
     assert manage_web.CONNECTED_FACT == "Connected to {label}"
 
 
+def test_an_unregistered_project_names_only_the_clients_installed_here(monkeypatch):
+    """The page names the clients this machine has, the command line
+    every client in the table (the owner's answer of 2026-10-01). With
+    one client in the table the two read alike wherever it is installed,
+    so this table carries a second client this machine does not have.
+    """
+    import dataclasses as dc
+
+    client = cn.CLIENTS[CLIENT]
+    other = dc.replace(client, name="other-client", label="Other Client")
+    monkeypatch.setattr(cn, "CLIENTS", {CLIENT: client, other.name: other})
+    monkeypatch.setattr(cn, "detect", lambda c, *, env=None: c.name == CLIENT)
+    state = ro.ProjectState(
+        root="C:\\work\\alpha", exists=True, mounted=True,
+        connected=ro.CONNECTED_NO, skills=())
+    assert dict(manage_web._facts(state))["connection"] == (
+        f"Not connected to {client.label}")
+    assert f"; not registered with {client.label} or Other Client; " in ro.reason_text(
+        ro.report_rows((state,), ())[0])
+
+
+def test_an_agent_with_one_skill_keeps_its_label():
+    """Where the agents' lists differ, each agent's line carries its
+    label at every count: none, one, and more than one."""
+    first, second = list(sk.HARNESSES)[:2]
+    state = ro.ProjectState(
+        root="C:\\work\\alpha", exists=True, mounted=True,
+        connected=ro.CONNECTED_NO, skills=(SKILL,),
+        agents=((first, (SKILL,)), (second, ())))
+    said = [line for which, line in manage_web._facts(state) if which == "skills"]
+    assert said == [f"{sk.HARNESSES[first].label}: 1 skill",
+                    f"{sk.HARNESSES[second].label}: no skills"]
+
+
 def test_no_page_roster_or_report_constant_names_a_client_or_a_skill():
     """Constraint 5, the other half: no constant carries a name.
 

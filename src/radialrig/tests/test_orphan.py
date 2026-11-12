@@ -27,7 +27,6 @@ from pathlib import Path
 
 import pytest
 
-from radialrig import cli
 from radialrig import connect as cn
 from radialrig import mount as mnt
 from radialrig import orphan
@@ -189,6 +188,19 @@ def test_it_refuses_a_key_whose_root_still_exists(
     assert root in out
     assert f'"radialrig unconnect {CLIENT} {root}"' in out
     assert [config.read_bytes() for config in copies] == before
+
+
+def test_a_rehearsed_refusal_ends_on_the_dry_run_line(tmp_path, copies, command, capsys):
+    """The same refusal, rehearsed: the same exit code and the same
+    lines, then the line that says nothing was written."""
+    project = _make_project(tmp_path / "standing")
+    key = connected(capsys, project)
+    code, real, err = run(capsys, "unconnect", CLIENT, "--orphan", key)
+    assert (code, err) == (3, "")
+    code, rehearsed, err = run(capsys, "unconnect", CLIENT, "--orphan", key, "--dry-run")
+    assert (code, err) == (3, "")
+    lines = real.splitlines()
+    assert rehearsed.splitlines() == [*lines[:-1], report.DRY_RUN_TAIL, lines[-1]]
 
 
 def test_a_key_with_no_pinned_root_is_an_error(copies, capsys):
@@ -432,3 +444,79 @@ def test_a_failed_orphan_write_leaves_both_copies_as_found(
     assert (roaming.read_bytes(), store.read_bytes()) == before
     assert planted in settings_of(roaming)["mcpServers"]
     assert planted in settings_of(store)["mcpServers"]
+
+
+def test_an_orphan_wording_that_names_detail_is_filled(monkeypatch):
+    """No row of this table names `{detail}` today. The rule the mount
+    kit's wordings follow holds for one that does."""
+    monkeypatch.setitem(orphan.ORPHAN_REASONS, "ORPHAN_PROBE", "saw {detail} of them")
+    row = mnt.Disposition("settings.json", mnt.LEFT, "ORPHAN_PROBE", "7")
+    assert orphan.reason_text(row) == "saw 7 of them"
+
+
+# --- rules the removal shares with the listing ------------------------
+
+def test_a_root_any_copy_pins_alive_refuses_the_key(tmp_path, copies, capsys):
+    """One key is decided over every copy, whichever copy is read first.
+
+    The listing never names a key that one copy pins to a standing
+    project, so the verb refuses it with the pins in either order.
+    """
+    roaming, store = copies
+    dead = tmp_path / "vanished"
+    alive = tmp_path / "still-here"
+    alive.mkdir()
+
+    def pin(root: Path) -> dict:
+        return {"command": "x", "args": [], "env": {ROOT_ENV: str(root)}}
+
+    for config, first, second in ((roaming, dead, alive), (store, alive, dead)):
+        body = settings_of(config)
+        body["mcpServers"][f"{PREFIX}one"] = pin(first)
+        body["mcpServers"][f"{PREFIX}two"] = pin(second)
+        config.write_text(json.dumps(body, indent=2), encoding="utf-8")
+    before = [config.read_bytes() for config in copies]
+
+    for key in (f"{PREFIX}one", f"{PREFIX}two"):
+        code, out, err = run(capsys, "unconnect", CLIENT, "--orphan", key)
+        assert code == 3, key
+        assert err == ""
+        assert out.splitlines()[0] == report.ORPHAN_REFUSAL_HEAD
+        assert str(alive) in out
+    assert [config.read_bytes() for config in copies] == before
+
+
+@pytest.mark.parametrize(
+    "damaged", [b"[1, 2, 3]\n", b"\xff\xfe not text\n"], ids=["not-an-object", "not-text"])
+def test_a_copy_that_reads_as_no_object_is_left(damaged, copies, planted, capsys):
+    """JSON of another shape, and bytes that are not text, cost what a
+    copy that does not parse costs: that copy is listed as left."""
+    roaming, store = copies
+    store.write_bytes(damaged)
+
+    code, out, err = run(capsys, "unconnect", CLIENT, "--orphan", planted)
+
+    assert code == 5
+    assert err == ""
+    assert marks(out) == {
+        roaming.as_posix(): mnt.EXCISED,
+        store.as_posix(): mnt.LEFT,
+    }
+    assert mnt.REASONS[mnt.CONNECT_UNPARSED_LEFT] in out
+    assert store.read_bytes() == damaged
+
+
+def test_a_copy_that_is_not_there_is_listed_as_absent(copies, planted, capsys):
+    """Absence is its own row: a file that is not there held nothing."""
+    roaming, store = copies
+    store.unlink()
+
+    code, out, err = run(capsys, "unconnect", CLIENT, "--orphan", planted)
+
+    assert code == 0
+    assert err == ""
+    assert marks(out) == {
+        roaming.as_posix(): mnt.EXCISED,
+        store.as_posix(): mnt.ABSENT,
+    }
+    assert not store.exists()

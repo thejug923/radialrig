@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
 import shutil
 from pathlib import Path
 
@@ -25,8 +26,8 @@ from radialrig import mount as mnt
 from radialrig import report
 from radialrig.tests.test_cli import FORBIDDEN_WORD, block
 from radialrig.tests.test_codex import bump_region
-from radialrig.tests.test_connect import STORE_VAR
-from radialrig.tests.test_mount import EXPECTED, MOUNT_DAY, _make_project, tree
+from radialrig.tests.test_connect import STORE_VAR, run, unset
+from radialrig.tests.test_mount import EXPECTED, MOUNT_DAY, tree
 from radialrig.tests.test_unmount import crlf
 
 ADOPT_DAY = dt.date(2026, 8, 22)
@@ -35,13 +36,13 @@ ADOPT_DAY = dt.date(2026, 8, 22)
 @pytest.fixture(autouse=True)
 def no_real_client(monkeypatch):
     """No test here may reach this machine's own client or roster state."""
-    for name in ("APPDATA", "LOCALAPPDATA"):
-        monkeypatch.delenv(name, raising=False)
+    unset(monkeypatch, "APPDATA", "LOCALAPPDATA")
 
 
-@pytest.fixture()
-def project(tmp_path) -> Path:
-    return _make_project(tmp_path / "sample-project")
+def test_no_real_client_leaves_the_profile_variables_absent():
+    """Absent, not pointed at an empty folder as conftest.py leaves them."""
+    assert "APPDATA" not in os.environ
+    assert "LOCALAPPDATA" not in os.environ
 
 
 @pytest.fixture()
@@ -50,12 +51,6 @@ def orphaned(project) -> Path:
     mnt.mount(project, today=MOUNT_DAY)
     (project / mnt.MANIFEST_REL).unlink()
     return project
-
-
-def run(capsys, *argv) -> tuple[int, str, str]:
-    code = cli.main(list(argv))
-    captured = capsys.readouterr()
-    return code, captured.out, captured.err
 
 
 # --- the round trip ---------------------------------------------------

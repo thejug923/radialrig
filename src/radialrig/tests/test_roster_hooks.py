@@ -29,7 +29,6 @@ from pathlib import Path
 
 import pytest
 
-from radialrig import cli
 from radialrig import connect as cn
 from radialrig import mount as mnt
 from radialrig import roster as ro

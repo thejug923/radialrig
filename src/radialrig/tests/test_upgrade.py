@@ -31,7 +31,6 @@ from radialrig.tests.test_mount import (  # noqa: F401 - fixtures are used by na
     EXPECTED,
     MOUNT_DAY,
     NEXT_VERSION,
-    _make_project,
     frontmatter,
     tree,
 )
@@ -44,11 +43,6 @@ from radialrig.tests.test_unmount import (
 )
 
 UPGRADE_DAY = dt.date(2026, 9, 2)
-
-
-@pytest.fixture()
-def project(tmp_path) -> Path:
-    return _make_project(tmp_path / "sample-project")
 
 
 @pytest.fixture()

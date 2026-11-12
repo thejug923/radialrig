@@ -38,7 +38,6 @@ from pathlib import Path
 from radialrig import connect as cn
 from radialrig import mount as mnt
 from radialrig import report
-from radialrig.paths import ROOT_ENV
 
 
 # --- this module's own wordings table ---------------------------------
@@ -58,12 +57,7 @@ def reason_text(d: mnt.Disposition) -> str:
     A caller passes this into `report` rather than `report` reaching for
     it, which is what keeps the import between the two running one way.
     """
-    text = ORPHAN_REASONS.get(d.code)
-    if text is None:
-        return mnt.reason_text(d)
-    if "{detail}" in text:
-        return text.format(detail=d.detail)
-    return text
+    return mnt.reason_text(d, ORPHAN_REASONS)
 
 
 # --- the refusal ------------------------------------------------------
@@ -73,7 +67,6 @@ class OrphanRefused(cn.ConnectError):
 
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
-        self.reason = reason
 
 
 # --- what one run would do --------------------------------------------
@@ -103,51 +96,15 @@ class OrphanPlan:
 
 
 # --- reading one copy -------------------------------------------------
-
-# What a read of one settings file answered. Absence and damage are
-# different rows: a file that is not there held nothing, and a file that
-# does not parse might hold anything.
-_ABSENT = object()
-_UNREADABLE = object()
-
-
-def _load(path: Path):
-    """One settings file as a dict, `_ABSENT`, or `_UNREADABLE`."""
-    try:
-        if not path.is_file():
-            return _ABSENT
-        raw = path.read_text(encoding="utf-8")
-    except (OSError, ValueError):
-        return _UNREADABLE
-    try:
-        loaded = json.loads(raw)
-    except ValueError:
-        return _UNREADABLE
-    return loaded if isinstance(loaded, dict) else _UNREADABLE
-
+# One settings file is read with the connect kit's `read_json`, as an
+# object or not at all. Absence and damage are different rows: a file
+# that is not there held nothing, and a file that does not parse might
+# hold anything.
 
 def _carries(client: cn.Client, body: dict, key: str) -> bool:
     """Whether this copy's container holds an entry under `key`."""
     servers = body.get(client.container)
     return isinstance(servers, dict) and key in servers
-
-
-def _pinned_root(entry) -> str:
-    """The project root one settings entry pins, "" when it pins none."""
-    if not isinstance(entry, dict):
-        return ""
-    entry_env = entry.get("env")
-    if not isinstance(entry_env, dict):
-        return ""
-    pinned = entry_env.get(ROOT_ENV)
-    return pinned if isinstance(pinned, str) else ""
-
-
-def _stands(root: str) -> bool:
-    try:
-        return Path(root).exists()
-    except (OSError, ValueError):  # pragma: no cover - a path this OS rejects
-        return False
 
 
 # --- the verb ---------------------------------------------------------
@@ -175,9 +132,9 @@ def _remove_plan(client_name: str, key: str, *, env) -> OrphanPlan:
     if not copies:
         raise cn.ConnectError(report.CONNECT_NO_CLIENT)
 
-    read = [(copy, _load(copy.path)) for copy in copies]
+    read = [(copy, cn.read_json(copy.path, object_only=True)) for copy in copies]
     pinned = [
-        _pinned_root(body[client.container][key])
+        cn.pinned_root(body[client.container][key])
         for _, body in read
         if isinstance(body, dict) and _carries(client, body, key)
     ]
@@ -186,21 +143,21 @@ def _remove_plan(client_name: str, key: str, *, env) -> OrphanPlan:
             client=client, key=key, found=False, dispositions=(), writes=(),
         )
 
-    for root in pinned:
-        if root and _stands(root):
-            raise OrphanRefused(report.orphan_root_alive(client, root))
-    if not all(pinned):
+    verdict, root = cn.pins_verdict(pinned)
+    if verdict == cn.PINS_STAND:
+        raise OrphanRefused(report.orphan_root_alive(client, root))
+    if verdict == cn.PINS_UNPINNED:
         raise cn.ConnectError(report.ORPHAN_NO_ROOT)
 
     dispositions: list[mnt.Disposition] = []
     writes: dict[Path, bytes] = {}
     for copy, body in read:
         shown = copy.path.as_posix()
-        if body is _ABSENT:
+        if body is cn.ABSENT:
             dispositions.append(
                 mnt.Disposition(shown, mnt.ABSENT, mnt.ABSENT_ALREADY_GONE))
             continue
-        if body is _UNREADABLE:
+        if body is cn.UNREADABLE:
             dispositions.append(
                 mnt.Disposition(shown, mnt.LEFT, mnt.CONNECT_UNPARSED_LEFT))
             continue

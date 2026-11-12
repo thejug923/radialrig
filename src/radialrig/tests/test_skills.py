@@ -55,11 +55,6 @@ RECORD_REL = ".claude/radialrig-skills.json"
 SKILL_DIR = ".claude/skills/session-handoff"
 
 
-@pytest.fixture()
-def project(tmp_path) -> Path:
-    return _make_project(tmp_path / "sample-project")
-
-
 def record_of(root: Path) -> dict:
     return json.loads((root / RECORD_REL).read_text(encoding="utf-8"))
 
@@ -134,7 +129,7 @@ def test_a_second_add_writes_nothing_at_all(project):
     assert again.current
     assert not again.wrote
     assert set(codes(again.dispositions)) == {mnt.SKILL_CURRENT}
-    assert all(d.detail == "3.3.0" for d in again.dispositions)
+    assert all(d.detail == "3.4.0" for d in again.dispositions)
 
 
 def test_a_plan_writes_nothing_and_matches_the_run(project):
@@ -803,14 +798,14 @@ def test_the_list_row_of_each_state(project):
     absent = sk.skill_state(project, SKILL)
     row = absent.list_disposition()
     assert (row.verb, row.code, row.detail) == (
-        mnt.ABSENT, mnt.SKILL_NOT_INSTALLED, "3.3.0",
+        mnt.ABSENT, mnt.SKILL_NOT_INSTALLED, "3.4.0",
     )
-    assert mnt.reason_text(row) == "3.3.0 available in this package; not installed here"
+    assert mnt.reason_text(row) == "3.4.0 available in this package; not installed here"
 
     sk.add(project, SKILL, today=INSTALL_DAY)
     row = sk.skill_state(project, SKILL).list_disposition()
     assert (row.verb, row.code) == (mnt.CURRENT, mnt.SKILL_CURRENT)
-    assert mnt.reason_text(row) == "3.3.0 already matches this package"
+    assert mnt.reason_text(row) == "3.4.0 already matches this package"
 
     (project / SKILL_DIR / "SKILL.md").write_bytes(b"# ours\n")
     assert sk.skill_state(project, SKILL).list_disposition().code == mnt.SKILL_EDITED
@@ -832,7 +827,7 @@ def test_the_list_row_of_an_installed_skill_the_package_outgrew(
     row = sk.skill_state(project, SKILL).list_disposition()
     assert (row.verb, row.code) == (mnt.LEFT, mnt.SKILL_REFRESHABLE)
     assert mnt.reason_text(row) == (
-        "3.3.0 installed; this package ships a newer release"
+        "3.4.0 installed; this package ships a newer release"
     )
 
 

@@ -3,7 +3,7 @@ name: session-handoff
 description: Use when the user asks to hand off, wrap up a session, or pass the work to a fresh agent before clearing context. Sweeps what this session started, writes a handoff file the next agent resumes from alone, and ends with a kickoff prompt.
 radialrig:
   id: session-handoff
-  version: 3.3.0
+  version: 3.4.0
 ---
 
 ## First, the rules that bind
@@ -109,9 +109,10 @@ content or diffs.
    the project root instruction file survives a reset.
 6. **Running state.** Background processes with shell ID, what each is, and its kill
    command; dev servers with url and port; open worktrees and branches.
-7. **Verification.** Two halves. *Verified this session*: command, exit code, salient
-   line. *Re-verify with*: command and expected outcome. Without the first half the
-   next session cannot tell proven from intended.
+7. **Verification.** *Verified this session*: command, exit code, salient line; for
+   tests, the commit and if the tree was clean. *Re-verify with*: command and
+   expected outcome. Without the first half the next session cannot tell proven from
+   intended.
 8. **Deferred + open questions.** `Deferred: <item> - <why>` and `Open: <question
    needing the user> - <context>`. Surfacing an embedded decision beats resolving it
    silently.
@@ -120,7 +121,7 @@ content or diffs.
 
 Footer, in the file: `Source: this session, <ISO date and time>. Review status: N of M
 entries verified; nothing here was read by a second reader. Confidence:
-<high|mixed|low> - <one clause>. Skill: session-handoff 3.3.0.`
+<high|mixed|low> - <one clause>. Skill: session-handoff 3.4.0.`
 
 When the file grows past what a cold reader needs, cut rather than append: resolved
 detours first, then background. A section with nothing to report says "none" and is

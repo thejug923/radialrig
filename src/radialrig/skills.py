@@ -135,7 +135,7 @@ class SkillEntry:
 SKILL_CATALOG: tuple[SkillEntry, ...] = (
     SkillEntry(
         name="session-handoff",
-        version="3.3.0",
+        version="3.4.0",
         summary="End of session sweep, a handoff file, and a kickoff prompt.",
         files=("SKILL.md", "scripts/handoff.py"),
     ),

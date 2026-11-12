@@ -77,7 +77,6 @@ class Session:
     arm: str
     answer: str
     cost_usd: float
-    duration_ms: int
     num_turns: int
     is_error: bool
 
@@ -291,7 +290,6 @@ def load_or_run(
         arm=arm.name,
         answer=str(raw.get("result", "")),
         cost_usd=float(raw.get("total_cost_usd") or 0.0),
-        duration_ms=int(raw.get("duration_ms") or 0),
         num_turns=int(raw.get("num_turns") or 0),
         is_error=bool(raw.get("is_error", False)),
     )

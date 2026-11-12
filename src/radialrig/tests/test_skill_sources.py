@@ -594,9 +594,11 @@ def test_the_rewrite_ships_as_version_three(skill_text):
     # consent table named its precedence and the done-condition became
     # the script's own check, and again when the standing constraints
     # gained a source per line, the kickoff prompt sent the reader back
-    # to those sources, and the word count became information.
+    # to those sources, and the word count became information. The minor
+    # moved again when a recorded pass on unchanged code could stand in
+    # for rerunning the tests at pickup.
     _, nested, _ = frontmatter(skill_text)
-    assert nested["version"] == "3.3.0"
+    assert nested["version"] == "3.4.0"
 
 
 def test_the_footer_template_names_the_version_the_frontmatter_ships(skill_text):
@@ -672,6 +674,48 @@ def test_the_kickoff_prompt_carries_the_resume_protocol(handoff):
     for phrase in ("Standing constraints", "Running state", "Verification",
                    "basic tests", "Pick up here"):
         assert phrase in block
+
+
+# The exception both the pickup prompt and the open-session guidance carry
+# (BUG-0025). A fresh session reran an eleven-minute suite that had just
+# passed on the same code. A recorded pass may stand in for a rerun only
+# when the record names its commit and a clean work tree and git shows
+# nothing since could change the result; every doubt falls back to running.
+RECORDED_PASS_TERMS = ("committed or not", "when in doubt")
+
+
+def test_the_kickoff_prompt_lets_a_recorded_pass_stand_on_unchanged_code(handoff):
+    # The rule covers both kinds of rerun the prompt orders: the commands
+    # listed under "Re-verify with" and the project's basic tests. Leaving
+    # either out leaves the eleven minutes in place.
+    block = flowed(handoff.KICKOFF_TEMPLATE)
+    for phrase in ("Verified this session", "its commit", "clean work tree",
+                   "Re-verify with", "basic tests", "without git",
+                   *RECORDED_PASS_TERMS):
+        assert phrase in block, phrase
+
+
+def test_the_template_asks_each_test_run_for_its_commit_and_tree(skill_text):
+    # The prompt's exception reads a commit and a clean tree from the
+    # record; a record that never states them can never qualify, so the
+    # handoff template has to ask for both, at the time the tests ran.
+    body = flowed(skill_text)
+    assert "for tests, the commit and if the tree was clean" in body
+
+
+def test_the_open_session_guidance_carries_the_same_exception():
+    # The memory-management guidance orders the same test step on opening
+    # any session. A prompt that excused the rerun while the guidance still
+    # ordered it would hand the next agent two rules that disagree.
+    from radialrig.paths import packaged_research
+
+    root = packaged_research()
+    assert root is not None, "the package ships no guidance corpus"
+    text = flowed((root / "agent-focus" / "memory-management" / "guidance.md")
+                  .read_text(encoding="utf-8"))
+    assert "running basic tests" in text
+    for phrase in RECORDED_PASS_TERMS:
+        assert phrase in text, phrase
 
 
 def test_the_kickoff_template_lives_only_in_the_script(skill_text):

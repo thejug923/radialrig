@@ -20,6 +20,7 @@ from __future__ import annotations
 import ast
 import datetime as dt
 import json
+import os
 import pathlib
 import re
 import shutil
@@ -37,7 +38,6 @@ from radialrig import roster as ro
 from radialrig import setup_web
 from radialrig.tests.test_mount import (  # noqa: F401 - helpers, by name
     MOUNT_DAY,
-    _make_project,
     tree,
 )
 
@@ -65,11 +65,19 @@ def store_row() -> ro.Store:
 STORE_VAR = store_row().sources[0].var
 
 
+def unset(monkeypatch, *names: str) -> None:
+    """Take each variable out of the environment, set or not.
+
+    Absent, not empty: conftest.py points the profile variables at
+    folders under tmp_path, and a caller here wants them gone instead.
+    """
+    for name in names:
+        monkeypatch.delenv(name, raising=False)
+
+
 def clear_store_env(monkeypatch) -> None:
     """No roster path on any platform: every store variable removed."""
-    for store in ro.STORES:
-        for source in store.sources:
-            monkeypatch.delenv(source.var, raising=False)
+    unset(monkeypatch, *(source.var for store in ro.STORES for source in store.sources))
 
 
 # The shapes a settings file arrives in. The `no-servers` row is the
@@ -92,13 +100,14 @@ CONFIG_HOSTS = {
 @pytest.fixture(autouse=True)
 def no_real_client(monkeypatch):
     """Belt and braces: discovery can never reach the real user profile."""
-    for name in ("APPDATA", "LOCALAPPDATA", "HOME"):
-        monkeypatch.delenv(name, raising=False)
+    unset(monkeypatch, "APPDATA", "LOCALAPPDATA", "HOME")
 
 
-@pytest.fixture()
-def project(tmp_path) -> Path:
-    return _make_project(tmp_path / "sample-project")
+def test_no_real_client_leaves_the_profile_variables_absent():
+    """Absent, not pointed at an empty folder as conftest.py leaves them."""
+    assert "APPDATA" not in os.environ
+    assert "LOCALAPPDATA" not in os.environ
+    assert "HOME" not in os.environ
 
 
 @pytest.fixture()
@@ -892,6 +901,13 @@ def test_every_connect_code_has_a_wording():
         assert "{" not in text, code
 
 
+def test_a_code_with_no_wording_renders_as_the_bare_code():
+    """The trap itself, pinned: the line still says something."""
+    row = mnt.Disposition("p", mnt.LEFT, "NO_SUCH_CODE", "mcpServers.k")
+    assert "NO_SUCH_CODE" not in mnt.REASONS
+    assert mnt.reason_text(row) == "NO_SUCH_CODE"
+
+
 def test_every_connect_code_is_in_the_closed_set():
     """The trap the test above cannot see: a code declared, used, and left
     out of `CONNECT_CODES` renders as the bare code and is never checked.
@@ -967,6 +983,16 @@ def test_an_unknown_client_lists_the_clients(project, capsys):
         assert out == ""
         assert "registers no client named 'no-such-client'" in err
         assert CLIENT in err
+
+
+def test_an_unknown_client_says_each_line_of_its_report_on_stderr(project, capsys):
+    """Each line of the report is its own line on stderr, under the
+    prefix every stderr line carries, for a project and for an orphan."""
+    want = "".join(f"radialrig: {line}\n" for line in
+                   report.connect_unknown_client_report("no-such-client", cn.clients()))
+    for argv in (["unconnect", "no-such-client", str(project)],
+                 ["unconnect", "no-such-client", "--orphan", "x"]):
+        assert run(capsys, *argv) == (cli.ERROR, "", want), argv
 
 
 def test_an_unregistered_project_says_so(project, env, command, capsys):

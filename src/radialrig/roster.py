@@ -42,8 +42,8 @@ from pathlib import Path
 
 from radialrig import connect as cn
 from radialrig import mount as mnt
+from radialrig import report
 from radialrig import skills as sk
-from radialrig.paths import ROOT_ENV
 
 ROSTER_SCHEMA = 1
 
@@ -162,17 +162,10 @@ def load(*, env=None) -> Roster:
     path = roster_path(env=env)
     if path is None:
         return _empty(writable=True)
-    try:
-        if not path.is_file():
-            return _empty(writable=True)
-        raw = path.read_text(encoding="utf-8")
-    except (OSError, ValueError):
-        return _empty(writable=False)
-    try:
-        body = json.loads(raw)
-    except ValueError:
-        return _empty(writable=False)
-    if not isinstance(body, dict):
+    body = cn.read_json(path)
+    if body is cn.ABSENT:
+        return _empty(writable=True)
+    if not isinstance(body, dict):  # unreadable, or JSON of another shape
         return _empty(writable=False)
     schema = body.get("schema")
     # A bool is an int in Python and a schema number is not one here, so
@@ -287,13 +280,14 @@ def record_seen(root: Path, *, today: dt.date | None = None,
 # --- per-entry verification -------------------------------------------
 
 CONNECTED_NO = "no"
-CONNECTED_MISMATCH = "mismatch"
+# The report module's spelling, which the machine-readable line prints as
+# this state carries it.
+CONNECTED_MISMATCH = report.PROJECTS_MISMATCH
 
-# What a read of one JSON file answered, when absence and damage mean
-# different verdicts. `_ABSENT` is a project carrying no such record;
-# `_UNREADABLE` is one whose record this build cannot parse.
-_ABSENT = object()
-_UNREADABLE = object()
+# A record is read with the connect kit's `read_json`, where absence and
+# damage mean different verdicts: `cn.ABSENT` is a project carrying no
+# such record, and `cn.UNREADABLE` is one whose record this build cannot
+# parse.
 
 
 @dataclass(frozen=True)
@@ -327,26 +321,6 @@ class ProjectState:
     # projects it lists and reads it off this one state, so its listing
     # row and its project page agree with each other.
     behind: bool = False
-
-
-def _read_json(path: Path):
-    """One file's JSON, `_ABSENT`, or `_UNREADABLE`. Never raises.
-
-    Deliberately not `connect._readable_record`: this module verifies and
-    never writes through a record, so that function's write guards would
-    refuse records this listing is meant to describe, and would surface
-    their errors where a listing has no way to report one.
-    """
-    try:
-        if not path.is_file():
-            return _ABSENT
-        text = path.read_text(encoding="utf-8")
-    except (OSError, ValueError):
-        return _UNREADABLE
-    try:
-        return json.loads(text)
-    except ValueError:
-        return _UNREADABLE
 
 
 def _named_copies(body: dict) -> list[str] | None:
@@ -390,8 +364,8 @@ def _connection(root: Path) -> tuple[str, str]:
     mismatch, so a mismatch still knows whose settings it is about
     (PLAN-0014 phase 3). The record is parsed once for both.
     """
-    body = _read_json(root / cn.CONNECT_REL)
-    if body is _ABSENT:
+    body = cn.read_json(root / cn.CONNECT_REL)
+    if body is cn.ABSENT:
         return CONNECTED_NO, ""
     if not isinstance(body, dict):
         return CONNECTED_MISMATCH, ""
@@ -411,7 +385,7 @@ def _connection(root: Path) -> tuple[str, str]:
     if not named or not entries:
         return CONNECTED_MISMATCH, client.name
     for shown in named:
-        loaded = _read_json(Path(shown))
+        loaded = cn.read_json(Path(shown))
         if not isinstance(loaded, dict):
             return CONNECTED_MISMATCH, client.name
         servers = loaded.get(client.container)
@@ -452,7 +426,7 @@ def _skills(root: Path) -> tuple[tuple[str, tuple[str, ...]], ...]:
     out: list[tuple[str, tuple[str, ...]]] = []
     for harness in sk.HARNESSES.values():
         names: set[str] = set()
-        body = _read_json(root / harness.record)
+        body = cn.read_json(root / harness.record)
         entries = body.get("skills") if isinstance(body, dict) else None
         for entry in entries if isinstance(entries, list) else ():
             if not isinstance(entry, dict) or not isinstance(entry.get("name"), str):
@@ -578,25 +552,6 @@ class Orphan:
     copies: tuple[str, ...]   # posix paths of the copies carrying it
 
 
-def _pinned_root(value) -> str:
-    """The project root one settings entry pins, or "" when it pins none."""
-    if not isinstance(value, dict):
-        return ""
-    entry_env = value.get("env")
-    if not isinstance(entry_env, dict):
-        return ""
-    pinned = entry_env.get(ROOT_ENV)
-    return pinned if isinstance(pinned, str) else ""
-
-
-def _stands(root: str) -> bool:
-    """Whether the path one settings entry pins is still on disk."""
-    try:
-        return Path(root).exists()
-    except (OSError, ValueError):  # pragma: no cover - a path this OS rejects
-        return False
-
-
 def orphans(*, env=None) -> tuple[Orphan, ...]:
     """Client entries this build writes whose project root is gone.
 
@@ -620,7 +575,7 @@ def orphans(*, env=None) -> tuple[Orphan, ...]:
         except OSError:  # pragma: no cover - an unreadable profile directory
             continue
         for copy in copies:
-            loaded = _read_json(copy.path)
+            loaded = cn.read_json(copy.path)
             if not isinstance(loaded, dict):
                 continue
             servers = loaded.get(client.container)
@@ -630,16 +585,15 @@ def orphans(*, env=None) -> tuple[Orphan, ...]:
                 if not isinstance(key, str) or not key.startswith(client.key_prefix):
                     continue
                 carried.setdefault((client.name, key), []).append(
-                    (_pinned_root(value), copy.path.as_posix()))
+                    (cn.pinned_root(value), copy.path.as_posix()))
 
     found: list[Orphan] = []
     for (client_name, key), seen in carried.items():
-        pins = [pinned for pinned, _ in seen]
-        if any(pinned and _stands(pinned) for pinned in pins):
+        verdict, root = cn.pins_verdict([pinned for pinned, _ in seen])
+        if verdict == cn.PINS_STAND:
             continue
         found.append(Orphan(
-            client=client_name, key=key,
-            root=pins[0] if all(pins) else "",
+            client=client_name, key=key, root=root,
             copies=tuple(shown for _, shown in seen),
         ))
     return tuple(sorted(found, key=lambda o: (o.key, o.client)))
@@ -693,38 +647,53 @@ def reason_text(d: mnt.Disposition) -> str:
     than `report` reaching for it: that is what keeps the import running
     one way.
     """
-    text = ROSTER_REASONS.get(d.code)
-    if text is None:
-        return mnt.reason_text(d)
-    if "{detail}" in text:
-        return text.format(detail=d.detail)
-    return text
+    return mnt.reason_text(d, ROSTER_REASONS)
 
 
-def _mounted_fact(state: ProjectState) -> str:
-    return "mounted" if state.mounted else "not mounted"
+@dataclass(frozen=True)
+class ProjectFacts:
+    """A project's three facts, decided once, for each surface to word.
+
+    The command line's row and the manage page's Status say these in
+    their own words, and the page keeps rules of its own: it names only
+    the clients installed on this machine, and drops the connection fact
+    where none is. Which facts hold is decided here, so the two cannot
+    read one state two ways.
+    """
+
+    mounted: bool
+    # The mismatch sentence, filled, where the record and the client
+    # disagree; empty where they do not.
+    mismatch: str
+    # The client the project is registered with, or None where it is
+    # registered with none. A mismatched state names none here.
+    client: cn.Client | None
+    # One unlabelled list where every agent has the same skills, and one
+    # list per agent, in map order and labelled from the map, where the
+    # lists differ.
+    skills: tuple[tuple[str, tuple[str, ...]], ...]
 
 
-def _connected_fact(state: ProjectState) -> str:
-    client = cn.CLIENTS.get(state.connected)
-    if client is None:
-        return f"not registered with {cn.label_phrase()}"
-    return f"registered with {client.label}"
+def project_facts(state: ProjectState) -> ProjectFacts:
+    """The facts both surfaces say about one project.
 
-
-def _skills_fact(state: ProjectState) -> str:
-    """One facet where the agents agree, one per agent where they differ.
-
-    The agent's label comes from the harness map at render time, so no
-    wording here names one; a listing that folded the agents into one
-    facet would call a project "skills: plan-review" when only one of
-    its agents can read that skill.
+    The client's label comes from the client table and the agent's from
+    the harness map, both when this is called, so no wording here names
+    one; a listing that folded the agents into one list would call a
+    project "skills: plan-review" when only one of its agents can read
+    that skill.
     """
     if agents_agree(state):
-        return _skills_facet("", state.skills)
-    return "; ".join(
-        _skills_facet(sk.HARNESSES[name].label, names)
-        for name, names in state.agents
+        skills = (("", state.skills),)
+    else:
+        skills = tuple(
+            (sk.HARNESSES[name].label, names) for name, names in state.agents)
+    return ProjectFacts(
+        mounted=state.mounted,
+        mismatch=(mismatch_clause(state)
+                  if state.connected == CONNECTED_MISMATCH else ""),
+        client=cn.CLIENTS.get(state.connected),
+        skills=skills,
     )
 
 
@@ -739,9 +708,10 @@ def mismatch_clause(state: ProjectState) -> str:
 
     The client's label where the record names one this build's table
     carries, the record file's path where it does not. Public because
-    both surfaces say it: the command line's row through `_facts`, and
-    the manage page's connection fact through its own builder, so the
-    template lives here once and neither surface restates it.
+    both surfaces say it: the command line's row and the manage page's
+    connection fact through `project_facts`, and the page's repair view
+    on its own, so the template lives here once and neither surface
+    restates it.
     """
     client = cn.CLIENTS.get(state.claimed)
     if client is not None:
@@ -749,9 +719,21 @@ def mismatch_clause(state: ProjectState) -> str:
     return UNKNOWN_CLIENT_CLAUSE.format(file=Path(state.root) / cn.CONNECT_REL)
 
 
-def _facts(state: ProjectState, connected: str) -> str:
-    """One row's three facets, in the order the report reads them."""
-    return "; ".join((_mounted_fact(state), connected, _skills_fact(state)))
+def _facts(state: ProjectState) -> str:
+    """One row's three facets, in the order the report reads them: the
+    command line's words for `project_facts`."""
+    said = project_facts(state)
+    if said.mismatch:
+        connected = said.mismatch
+    elif said.client is None:
+        connected = f"not registered with {cn.label_phrase()}"
+    else:
+        connected = f"registered with {said.client.label}"
+    return "; ".join((
+        "mounted" if said.mounted else "not mounted",
+        connected,
+        "; ".join(_skills_facet(label, names) for label, names in said.skills),
+    ))
 
 
 def orphan_command(orphan: Orphan) -> str:
@@ -775,12 +757,12 @@ def report_rows(states, found) -> tuple[mnt.Disposition, ...]:
         elif state.connected == CONNECTED_MISMATCH:
             rows.append(mnt.Disposition(
                 state.root, mnt.LEFT, ROSTER_MISMATCH,
-                _facts(state, mismatch_clause(state)),
+                _facts(state),
             ))
         else:
             rows.append(mnt.Disposition(
                 state.root, mnt.CURRENT, ROSTER_LISTED,
-                _facts(state, _connected_fact(state)),
+                _facts(state),
             ))
     for orphan in found:
         if orphan.root:
