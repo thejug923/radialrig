@@ -77,11 +77,6 @@ def profile(tmp_path, monkeypatch) -> Path:
     return home / "radialrig" / "roster.json"
 
 
-@pytest.fixture()
-def project(tmp_path) -> Path:
-    return _make_project(tmp_path / "sample-project")
-
-
 def plant(path: Path, body) -> bytes:
     """A roster file written by something other than this module."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -808,3 +803,22 @@ def test_a_missing_store_variable_costs_the_roster_and_nothing_else(
     assert ro.orphans() == ()
     assert not (Path(os.environ.get("LOCALAPPDATA", str(project))) /
                 "radialrig").exists()
+
+
+# --- damage that is not a parse error ---------------------------------
+
+def test_a_record_that_is_not_text_reads_as_a_mismatch(tmp_path):
+    """Bytes that are not text are damage, not absence: the record is
+    there, and this build cannot read what it claims."""
+    project = _make_project(tmp_path / "not-text")
+    cn.record_path(project).parent.mkdir(parents=True, exist_ok=True)
+    cn.record_path(project).write_bytes(b"\xff\xfe not text\n")
+    assert ro.verify(project).connected == ro.CONNECTED_MISMATCH
+
+
+def test_a_roster_that_is_not_text_reads_as_empty_and_unwritable(tmp_path):
+    home = tmp_path / "not-text"
+    plant(home / "radialrig" / "roster.json", b"\xff\xfe not text\n")
+    roster = ro.load(env={STORE_VAR: str(home)})
+    assert roster.entries == ()
+    assert roster.writable is False

@@ -1177,11 +1177,6 @@ def _walk_state(session: ManageSession, root: str):
     return setup_web.compute_state(sub), sub
 
 
-def setup_state(session: ManageSession, root: str) -> setup_web.PageState:
-    """What the walkthrough shows for this folder. Writes nothing."""
-    return _walk_state(session, root)[0]
-
-
 class _Press:
     """The one attribute the setup page's POST tail reads off its handler.
 
@@ -1220,7 +1215,7 @@ def _reason(d: mnt.Disposition) -> str:
     the setup page's own table sentence, so no cell on a wrote-table is
     ever blank where the page has something true to say.
     """
-    return orphan.reason_text(d) or setup_web.WROTE_REASONS.get(d.code, "")
+    return setup_web._worded(d, orphan.reason_text)
 
 
 def _drawn(line: str, dispositions) -> bool:
@@ -1282,6 +1277,45 @@ def _stopped(act: Action, exc: Exception) -> setup_web.PageState:
     return _failed(act, str(exc))
 
 
+# A kit error as a page state, one ladder per kit. A stopped write is a
+# `MountError` or a `ConnectError` too, so each ladder reads it first:
+# read after them, a partial stop would show as a plain failure. A runner
+# reads its own refusal before its kit's ladder.
+_MOUNT_ERRORS = (mnt.MountError, cn.WriteStopped)
+_CLIENT_ERRORS = (cn.ConnectError, mnt.WriteStopped)
+_SKILL_ERRORS = (sk.SkillError, mnt.WriteStopped, cn.WriteStopped)
+
+
+def _error_state(act: Action, exc: Exception) -> setup_web.PageState:
+    """The mount kit's ladder: a stopped write under the setup page's
+    rule, any other error as the plain failure."""
+    if isinstance(exc, (mnt.WriteStopped, cn.WriteStopped)):
+        return _stopped(act, exc)
+    return _failed(act, str(exc))
+
+
+def _client_error(act: Action, exc: Exception) -> setup_web.PageState:
+    """The connect kit's ladder: a client this build does not know, said
+    in the report's own lines, then the mount kit's rule."""
+    if isinstance(exc, cn.UnknownClient):
+        return _failed(act, "; ".join(
+            report.connect_unknown_client_report(exc.name, exc.available)))
+    return _error_state(act, exc)
+
+
+def _skill_error(act: Action, exc: Exception, *, dry_run: bool) -> setup_web.PageState:
+    """The skills kit's ladder: an unknown skill fails, a conflict
+    refuses, and anything else stops the press under the setup page's
+    rule, which reads a stopped write the kit's error carries."""
+    if isinstance(exc, sk.UnknownSkill):
+        return _failed(act, "; ".join(
+            report.skill_unknown_report(exc.name, exc.available)))
+    if isinstance(exc, sk.SkillConflict):
+        return _refused(act, report.skill_conflict_report(
+            exc.conflicts, dry_run=dry_run), exc.conflicts)
+    return _stopped(act, exc)
+
+
 def _refused(act: Action, lines, conflicts=()) -> setup_web.PageState:
     return setup_web.PageState(
         REFUSED, report.REFUSED, False,
@@ -1319,24 +1353,11 @@ def _unmount(act: Action, *, dry_run: bool) -> setup_web.PageState:
     root = _root_of(act)
     if root is None:
         return _no_directory(act)
-    if not mnt.is_mounted(root):
-        if not dry_run:
-            ro.record_seen(root)
-        return _answer(act, report.NOOP, report.not_mounted_report(root),
-                       dry_run=dry_run)
     try:
-        plan = mnt.unmount_plan(root) if dry_run else mnt.unmount(root)
-    except (mnt.WriteStopped, cn.WriteStopped) as exc:
-        return _stopped(act, exc)
-    except mnt.MountError as exc:
-        return _failed(act, str(exc))
-    if not dry_run:
-        ro.record_seen(root)
-    return _answer(
-        act, report.OK if plan.complete else report.PARTIAL,
-        cli._unmount_report(plan, dry_run=dry_run), plan.dispositions,
-        dry_run=dry_run,
-    )
+        answer = cli.unmount_step(root, dry_run=dry_run)
+    except _MOUNT_ERRORS as exc:
+        return _error_state(act, exc)
+    return _answer(act, answer.outcome, answer.lines, answer.rows, dry_run=dry_run)
 
 
 def _skill_added(act: Action, compose, render, *, dry_run: bool) -> setup_web.PageState:
@@ -1356,16 +1377,8 @@ def _skill_added(act: Action, compose, render, *, dry_run: bool) -> setup_web.Pa
         return _no_directory(act)
     try:
         results = compose(root, targets=act.targets)
-    except sk.UnknownSkill as exc:
-        return _failed(act, "; ".join(
-            report.skill_unknown_report(exc.name, exc.available)))
-    except sk.SkillConflict as exc:
-        return _refused(act, report.skill_conflict_report(
-            exc.conflicts, dry_run=dry_run), exc.conflicts)
-    except (mnt.WriteStopped, cn.WriteStopped) as exc:
-        return _stopped(act, exc)
-    except sk.SkillError as exc:
-        return _stopped(act, exc)
+    except _SKILL_ERRORS as exc:
+        return _skill_error(act, exc, dry_run=dry_run)
     if all(r.current for r in results):
         outcome = report.NOOP
     else:
@@ -1404,16 +1417,8 @@ def _skill_remove(act: Action, *, dry_run: bool) -> setup_web.PageState:
     try:
         plans = [p for p in (sk.remove_all_plan if dry_run else sk.remove_all)(
             root, act.skill, targets=act.targets) if p.installed]
-    except sk.UnknownSkill as exc:
-        return _failed(act, "; ".join(
-            report.skill_unknown_report(exc.name, exc.available)))
-    except sk.SkillConflict as exc:
-        return _refused(act, report.skill_conflict_report(
-            exc.conflicts, dry_run=dry_run), exc.conflicts)
-    except (mnt.WriteStopped, cn.WriteStopped) as exc:
-        return _stopped(act, exc)
-    except sk.SkillError as exc:
-        return _stopped(act, exc)
+    except _SKILL_ERRORS as exc:
+        return _skill_error(act, exc, dry_run=dry_run)
     if not plans:
         return _answer(act, report.NOOP,
                        report.skill_not_installed_report(root, act.skill),
@@ -1435,16 +1440,11 @@ def _connect(act: Action, *, dry_run: bool) -> setup_web.PageState:
         # name off this project's mount record rather than off the page.
         result = (cn.connect_plan if dry_run else cn.connect)(
             root, act.client, scope=None)
-    except cn.UnknownClient as exc:
-        return _failed(act, "; ".join(
-            report.connect_unknown_client_report(exc.name, exc.available)))
     except cn.ConnectRefused as exc:
         return _refused(act, report.connect_refused_report(
             exc.client, root, exc.conflicts, dry_run=dry_run), exc.conflicts)
-    except (mnt.WriteStopped, cn.WriteStopped) as exc:
-        return _stopped(act, exc)
-    except cn.ConnectError as exc:
-        return _failed(act, str(exc))
+    except _CLIENT_ERRORS as exc:
+        return _client_error(act, exc)
     if not dry_run:
         ro.record_seen(root)
     return _answer(act, report.NOOP if result.current else report.OK,
@@ -1457,51 +1457,22 @@ def _unconnect(act: Action, *, dry_run: bool) -> setup_web.PageState:
     if root is None:
         return _no_directory(act)
     try:
-        plan = (cn.unconnect_plan if dry_run else cn.unconnect)(root, act.client)
-    except cn.UnknownClient as exc:
-        return _failed(act, "; ".join(
-            report.connect_unknown_client_report(exc.name, exc.available)))
-    except (mnt.WriteStopped, cn.WriteStopped) as exc:
-        return _stopped(act, exc)
-    except cn.ConnectError as exc:
-        return _failed(act, str(exc))
-    if not dry_run:
-        ro.record_seen(root)
-    if not plan.connected:
-        return _answer(act, report.NOOP,
-                       report.connect_not_connected_report(root, plan.client),
-                       dry_run=dry_run)
-    return _answer(
-        act, report.OK if plan.complete else report.PARTIAL,
-        report.unconnect_report(plan, dry_run=dry_run), plan.dispositions,
-        dry_run=dry_run,
-    )
+        answer = cli.unconnect_step(root, act.client, dry_run=dry_run)
+    except _CLIENT_ERRORS as exc:
+        return _client_error(act, exc)
+    return _answer(act, answer.outcome, answer.lines, answer.rows, dry_run=dry_run)
 
 
 def _orphan(act: Action, *, dry_run: bool) -> setup_web.PageState:
     """The entry whose project is gone. No root, so no side entry either."""
     try:
-        plan = (orphan.remove_plan if dry_run else orphan.remove)(
-            act.client, act.key)
-    except cn.UnknownClient as exc:
-        return _failed(act, "; ".join(
-            report.connect_unknown_client_report(exc.name, exc.available)))
+        answer = cli.orphan_step(act.client, act.key, dry_run=dry_run)
     except orphan.OrphanRefused as exc:
         return _refused(act, report.orphan_refused_report(
             str(exc), dry_run=dry_run))
-    except (mnt.WriteStopped, cn.WriteStopped) as exc:
-        return _stopped(act, exc)
-    except cn.ConnectError as exc:
-        return _failed(act, str(exc))
-    if not plan.found:
-        return _answer(act, report.NOOP,
-                       report.orphan_not_found_report(plan.client, plan.key),
-                       dry_run=dry_run)
-    return _answer(
-        act, report.OK if plan.complete else report.PARTIAL,
-        report.orphan_report(plan, resolve=orphan.reason_text, dry_run=dry_run),
-        plan.dispositions, dry_run=dry_run,
-    )
+    except _CLIENT_ERRORS as exc:
+        return _client_error(act, exc)
+    return _answer(act, answer.outcome, answer.lines, answer.rows, dry_run=dry_run)
 
 
 def _update_rows(plan) -> list[mnt.Disposition]:
@@ -1520,20 +1491,17 @@ def _update(act: Action, *, dry_run: bool) -> setup_web.PageState:
     root = _root_of(act)
     if root is None:
         return _no_directory(act)
-    if not mnt.is_mounted(root):
-        return _answer(act, report.NOOP, report.not_mounted_report(root),
-                       dry_run=dry_run)
     try:
-        plan = update.plan(root) if dry_run else update.run(root)
-    except (mnt.WriteStopped, cn.WriteStopped) as exc:
-        return _stopped(act, exc)
-    except mnt.MountError as exc:
-        return _failed(act, str(exc))
+        answer = cli.update_step(root, dry_run=dry_run)
+    except _MOUNT_ERRORS as exc:
+        return _error_state(act, exc)
+    if answer.plan is None:
+        return _answer(act, answer.outcome, answer.lines, dry_run=dry_run)
     return setup_web.PageState(
-        UPDATE_PLAN if dry_run else UPDATED, cli._update_outcome(plan), False,
-        dispositions=tuple(_update_rows(plan)),
-        lines=tuple(report.update_report(plan, dry_run=dry_run)),
-        result=(act, plan),
+        UPDATE_PLAN if dry_run else UPDATED, answer.outcome, False,
+        dispositions=tuple(_update_rows(answer.plan)),
+        lines=answer.lines,
+        result=(act, answer.plan),
     )
 
 
@@ -1543,23 +1511,19 @@ def _update_all(act: Action, *, dry_run: bool) -> setup_web.PageState:
     carries the projects as the step answered them, so the body draws
     each project's rows as a table under its folder; the lines are the
     command line's whole report, which is what the log keeps."""
-    found = update.plan_all() if dry_run else update.run_all()
-    if not found:
-        lines: tuple[str, ...] = (report.PROJECTS_NONE,)
-    else:
-        lines = tuple(report.update_all_report(found, dry_run=dry_run))
+    answer = cli.update_all_step(dry_run=dry_run)
     return setup_web.PageState(
-        UPDATE_ALL_PLAN if dry_run else UPDATED_ALL,
-        cli._update_all_outcome(found) if found else report.NOOP, False,
-        lines=lines, result=(act, found),
+        UPDATE_ALL_PLAN if dry_run else UPDATED_ALL, answer.outcome, False,
+        lines=answer.lines, result=(act, answer.plan),
     )
 
 
 # One runner per verb, rehearsal and confirmed press alike, told apart by
-# `dry_run`. The roster side entry rides inside them, mirroring `cli.py`'s
-# own seams: unmount, connect and unconnect keep it on their real runs and
-# on their already-done exits, and the skill verbs and the update verbs
-# keep none, because the command line keeps none.
+# `dry_run`. The roster side entry rides inside them as the command line
+# keeps it: unmount and unconnect keep it through the step they share with
+# their verbs, and connect keeps it itself, each on its real runs and on
+# its already-done exits; the skill verbs and the update verbs keep none,
+# because the command line keeps none.
 RUNNERS = {
     UNMOUNT: _unmount,
     SKILL_ADD: _skill_add,
@@ -1833,23 +1797,6 @@ def _name_parts(root: str) -> tuple[str, str]:
     return path.name, str(path.parent)
 
 
-def _skills_facts(state: ro.ProjectState) -> tuple[str, ...]:
-    """The skills fact: one count, or one line per agent.
-
-    One where every agent has the same skills, as the row always said
-    it; one per agent, in map order and labelled from the map, where
-    the lists differ (PLAN-0015 phase 2 prescription 5). The rule is
-    the roster's, so the command line's row and this fact split on the
-    same projects.
-    """
-    if ro.agents_agree(state):
-        return (_skills_count(len(state.skills)),)
-    return tuple(
-        _skills_count(len(names), sk.HARNESSES[name].label)
-        for name, names in state.agents
-    )
-
-
 def _skills_count(count: int, label: str = "") -> str:
     if count == 0:
         return AGENT_NO_SKILLS_FACT.format(label=label) if label else NO_SKILLS_FACT
@@ -1870,29 +1817,33 @@ def _facts(state: ro.ProjectState) -> tuple[tuple[str, str], ...]:
     claims, or naming the record file where it claims none this build
     knows (PLAN-0014 phase 3): the same sentence the command line's row
     carries, from the same template in `roster.py`. The skills fact is
-    one entry where the agents agree and one per agent where they do
-    not, every one of them under the same class.
+    one entry where the agents agree and one per agent, in map order and
+    labelled from the map, where they do not (PLAN-0015 phase 2
+    prescription 5), every one of them under the same class.
 
-    A project registered with no client names the clients installed on
-    this machine, and drops the connection fact where none is: there is
-    nothing to connect, and a client the reader does not have is never
-    named to them.
+    The facts are the roster's (`ro.project_facts`), the same the command
+    line's row says, so the two split on the same projects; the words
+    are this page's. A project registered with no client names the
+    clients installed on this machine, and drops the connection fact
+    where none is: there is nothing to connect, and a client the reader
+    does not have is never named to them.
     """
-    mounted = MOUNTED_FACT if state.mounted else NOT_MOUNTED_FACT
-    client = cn.CLIENTS.get(state.connected)
-    if state.connected == ro.CONNECTED_MISMATCH:
-        connection = ro.mismatch_clause(state)
-    elif client is None:
+    said = ro.project_facts(state)
+    mounted = MOUNTED_FACT if said.mounted else NOT_MOUNTED_FACT
+    if said.mismatch:
+        connection = said.mismatch
+    elif said.client is None:
         here = cn.installed()
         connection = (
             NOT_CONNECTED_FACT.format(label=cn.label_phrase(here)) if here else None)
     else:
-        connection = CONNECTED_FACT.format(label=client.label)
+        connection = CONNECTED_FACT.format(label=said.client.label)
     return (
         ("mounted", mounted),
         *((("update", UPDATE_AVAILABLE_FACT),) if state.behind else ()),
         *((("connection", connection),) if connection else ()),
-        *(("skills", said) for said in _skills_facts(state)),
+        *(("skills", _skills_count(len(names), label))
+          for label, names in said.skills),
     )
 
 
@@ -2751,7 +2702,7 @@ def _mismatch_note(facts) -> str:
     build knows, in full: this view keeps every command in full, and the
     disclosure of the project page is not its idiom.
     """
-    if facts.connected != report.PROJECTS_MISMATCH:
+    if facts.connected != ro.CONNECTED_MISMATCH:
         return ""
     return (
         f'<p class="note">{_esc(ro.mismatch_clause(facts))}</p>'

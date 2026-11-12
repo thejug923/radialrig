@@ -626,12 +626,6 @@ impl Engine {
     }
 }
 
-impl Default for Engine {
-    fn default() -> Self {
-        Engine::new()
-    }
-}
-
 /// One close post over loopback, its answer read and thrown away.
 fn post(target: &CloseTarget) {
     let addressed = target.authority.clone();

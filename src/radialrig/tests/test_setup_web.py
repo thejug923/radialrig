@@ -17,6 +17,7 @@ import html
 import http.client
 import io
 import json
+import os
 import re
 import socket
 import subprocess
@@ -37,6 +38,7 @@ from radialrig.tests.test_connect import (  # noqa: F401 - helpers, by name
     CONFIG_HOSTS,
     roaming_config,
     store_config,
+    unset,
 )
 from radialrig.tests.test_connect import fake_client as client_env
 from radialrig.tests.test_mount import (  # noqa: F401 - helpers, by name
@@ -114,8 +116,13 @@ def no_real_client(monkeypatch):
     from one without it, and the offer would name a real settings file.
     A test that wants the offer injects its own directories.
     """
-    for name in ("APPDATA", "LOCALAPPDATA"):
-        monkeypatch.delenv(name, raising=False)
+    unset(monkeypatch, "APPDATA", "LOCALAPPDATA")
+
+
+def test_no_real_client_leaves_the_profile_variables_absent():
+    """Absent, not pointed at an empty folder as conftest.py leaves them."""
+    assert "APPDATA" not in os.environ
+    assert "LOCALAPPDATA" not in os.environ
 
 
 def fake_client(tmp_path: Path) -> Path:

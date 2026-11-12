@@ -418,11 +418,6 @@ class Session:
             self._launch_spent = True
             return LAUNCH_OK
 
-    @property
-    def launch_spent(self) -> bool:
-        with self._lock:
-            return self._launch_spent
-
     def valid(self, candidate: str) -> bool:
         return secrets.compare_digest(candidate, self.token)
 
@@ -1099,12 +1094,23 @@ WROTE_REASONS: dict[str, str] = {
 }
 
 
+def _worded(d, resolve) -> str:
+    """A row's sentence: the engine's wording, or this table's sentence
+    for a code the engine leaves wordless.
+
+    `resolve` is the engine resolver the caller's rows belong to. The
+    setup page passes the mount kit's and the manage page the orphan
+    kit's, so each page keeps reading the tables it read before.
+    """
+    return resolve(d) or WROTE_REASONS.get(d.code, "")
+
+
 def _resolved(dispositions) -> list[tuple[str, str, str]]:
     """Every disposition as its three cells, in the engine's own words."""
     out = []
     for d in dispositions:
         reason = report.conflict_reason(d.path) if d.code == "CONFLICT" \
-            else (mnt.reason_text(d) or WROTE_REASONS.get(d.code, ""))
+            else _worded(d, mnt.reason_text)
         out.append((d.verb, d.path, reason))
     return out
 

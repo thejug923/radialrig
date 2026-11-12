@@ -2124,12 +2124,6 @@ impl Shell {
     }
 }
 
-impl Default for Shell {
-    fn default() -> Self {
-        Shell::new()
-    }
-}
-
 /// The stopped picture. The step the run reached stays on the view: the
 /// page draws its count and its track only when a run actually got
 /// somewhere, and a stop from the opening look at the machine carries no

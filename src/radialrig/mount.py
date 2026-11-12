@@ -117,19 +117,19 @@ class WriteStopped(MountError):
     """A file error stopped a verb, and the tree stands as found unless
     `left` says otherwise (PLAN-0017 phase 2).
 
-    `path` is the file the error names, `reason` the system's words for
-    it, and `left` the paths whose original bytes could not be put back:
-    empty when every write was undone or none had begun. The text is one
-    sentence ending "nothing was written" or "put back except: ...", so
-    every surface prints the same true line. Outside this module it is
-    caught as the pair `(mnt.WriteStopped, cn.WriteStopped)`.
+    `path` is the file the error names, the `reason` argument the system's
+    words for it, and `left` the paths whose original bytes could not be
+    put back: empty when every write was undone or none had begun. The
+    text is one sentence ending "nothing was written" or
+    "put back except: ...", so every surface prints the same true line.
+    Outside this module it is caught as the pair
+    `(mnt.WriteStopped, cn.WriteStopped)`.
     """
 
     def __init__(self, path, reason: str, left=()) -> None:
         self.path = str(path) if path else ""
-        self.reason = reason
         self.left = tuple(str(p) for p in left)
-        super().__init__(stopped_sentence(self.path, self.reason, self.left))
+        super().__init__(stopped_sentence(self.path, reason, self.left))
 
 
 def stopped_sentence(path: str, reason: str, left) -> str:
@@ -654,20 +654,26 @@ class Disposition:
     detail: str = ""   # rendered numbers, e.g. "3"
 
 
-def reason_text(d: Disposition) -> str:
+def reason_text(d: Disposition, own: dict[str, str] | None = None) -> str:
     """The one wording for a disposition. Both surfaces call this.
+
+    A module with wordings of its own passes its table as `own`. A code
+    that table carries is worded from it, and every other code is worded
+    from `REASONS`, as it is when no table is passed.
 
     A wording that names `{detail}` is filled from the disposition's
     detail field, which is how a version number rides into a line
     without a second renderer. No wording written before this rule
     existed carries a brace, so every one of them resolves as it did.
     """
-    if d.code == LEFT_DIR_OCCUPIED:
-        count = int(d.detail or "0")
-        if count:
-            return f"holds {count} file(s) this project added"
-        return REASONS[LEFT_DIR_OCCUPIED]
-    text = REASONS.get(d.code, d.code)
+    text = own.get(d.code) if own is not None else None
+    if text is None:
+        if d.code == LEFT_DIR_OCCUPIED:
+            count = int(d.detail or "0")
+            if count:
+                return f"holds {count} file(s) this project added"
+            return REASONS[LEFT_DIR_OCCUPIED]
+        text = REASONS.get(d.code, d.code)
     if "{detail}" in text:
         return text.format(detail=d.detail)
     return text

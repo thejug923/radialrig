@@ -1,10 +1,12 @@
 """Umbrella command: `radialrig mount`, `unmount`, `upgrade`, `setup`.
 
-PLAN-0005 Phases 3 and 4. This module owns argument parsing and nothing
-else. Every verb, every path and every reason string comes from
-`radialrig.mount`, and every sentence around them from
-`radialrig.report`, so the local setup page renders the same content from
-the same functions rather than a copy of this text (D-34 point 3).
+PLAN-0005 Phases 3 and 4. This module owns argument parsing, and the
+steps that unmount, unconnect, orphan removal and the two updates run,
+which the manage page's presses call too (PLAN-0025). Every verb, every
+path and every reason string comes from `radialrig.mount`, and every
+sentence around them from `radialrig.report`, so the local setup page
+renders the same content from the same functions rather than a copy of
+this text (D-34 point 3).
 
 Exit codes:
   0  did what the verb says
@@ -26,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 from radialrig import activity_log as al
@@ -187,6 +190,31 @@ def _record_run(args, argv: list[str], root, code: int | None = None, *,
     )
 
 
+# --- the steps the manage page shares ----------------------------------
+# PLAN-0025 phase 2, group 3. Unmount, unconnect, orphan removal and the
+# two updates each run as one step, which the verb and the manage page's
+# press both call: the step picks the rehearsal or the real run, calls
+# the engine, builds the report, prints it through the printer it is
+# given, keeps the roster's side entry after it, and picks the exit code.
+# What a surface makes of an error stays its own, so a step raises
+# whatever the engine raised: the verb says one line on stderr, and the
+# page reads a stopped write as a partial stop.
+
+@dataclass(frozen=True)
+class Answer:
+    """What one step answered: its exit code, its report, the rows the
+    report's block holds, and the plan or listing the page draws from."""
+
+    outcome: int
+    lines: tuple[str, ...]
+    rows: tuple = ()
+    plan: object | None = None
+
+
+def _quiet(lines) -> None:
+    """The page's printer: it prints nothing, and draws `Answer.lines`."""
+
+
 # --- mount ------------------------------------------------------------
 
 def _cmd_mount(args, root: Path) -> int:
@@ -244,18 +272,27 @@ def _unmount_report(plan: mnt.UnmountPlan, *, dry_run: bool) -> list[str]:
     return lines
 
 
-def _cmd_unmount(args, root: Path) -> int:
+def unmount_step(root: Path, *, dry_run: bool, emit=_quiet) -> Answer:
+    """`radialrig unmount`, for the verb and the page's press alike. A
+    folder with nothing mounted answers the no-op code, and keeps the
+    side entry as a real run does."""
     if not mnt.is_mounted(root):
-        _emit(report.not_mounted_report(root))
-        ro.record_seen(root, dry_run=args.dry_run)
-        return NOOP
+        answer = Answer(NOOP, tuple(report.not_mounted_report(root)))
+    else:
+        plan = mnt.unmount_plan(root) if dry_run else mnt.unmount(root)
+        answer = Answer(OK if plan.complete else PARTIAL,
+                        tuple(_unmount_report(plan, dry_run=dry_run)),
+                        plan.dispositions)
+    emit(answer.lines)
+    ro.record_seen(root, dry_run=dry_run)
+    return answer
+
+
+def _cmd_unmount(args, root: Path) -> int:
     try:
-        plan = mnt.unmount_plan(root) if args.dry_run else mnt.unmount(root)
+        return unmount_step(root, dry_run=args.dry_run, emit=_emit).outcome
     except mnt.MountError as exc:
         return _fail(str(exc))
-    _emit(_unmount_report(plan, dry_run=args.dry_run))
-    ro.record_seen(root, dry_run=args.dry_run)
-    return OK if plan.complete else PARTIAL
 
 
 # --- upgrade ----------------------------------------------------------
@@ -273,18 +310,28 @@ def _update_outcome(plan) -> int:
     return PARTIAL if plan.review else OK
 
 
+def update_step(root: Path, *, dry_run: bool, emit=_quiet) -> Answer:
+    """`radialrig upgrade <folder>`, for the verb and the page's press.
+    The answer carries the plan, which the page draws the report's
+    blocks from. Neither surface keeps a side entry for it."""
+    if not mnt.is_mounted(root):
+        answer = Answer(NOOP, tuple(report.not_mounted_report(root)))
+    else:
+        plan = update.plan(root) if dry_run else update.run(root)
+        answer = Answer(_update_outcome(plan),
+                        tuple(report.update_report(plan, dry_run=dry_run)),
+                        plan=plan)
+    emit(answer.lines)
+    return answer
+
+
 def _cmd_upgrade(args, root: Path) -> int:
     if args.all:
         return _cmd_upgrade_all(args)
-    if not mnt.is_mounted(root):
-        _emit(report.not_mounted_report(root))
-        return NOOP
     try:
-        plan = update.plan(root) if args.dry_run else update.run(root)
+        return update_step(root, dry_run=args.dry_run, emit=_emit).outcome
     except mnt.MountError as exc:
         return _fail(str(exc))
-    _emit(report.update_report(plan, dry_run=args.dry_run))
-    return _update_outcome(plan)
 
 
 # The order the worst of several projects' codes is picked in: a stop
@@ -304,13 +351,23 @@ def _update_all_outcome(found) -> int:
     return max(codes, key=_SEVERITY.__getitem__)
 
 
-def _cmd_upgrade_all(args) -> int:
-    found = update.plan_all() if args.dry_run else update.run_all()
+def update_all_step(*, dry_run: bool, emit=_quiet) -> Answer:
+    """`radialrig upgrade --all`, for the verb and the page's press. The
+    answer carries the projects as the step answered them, which the
+    page draws one table per project from."""
+    found = update.plan_all() if dry_run else update.run_all()
     if not found:
-        _emit([report.PROJECTS_NONE])
-        return NOOP
-    _emit(report.update_all_report(found, dry_run=args.dry_run))
-    return _update_all_outcome(found)
+        answer = Answer(NOOP, (report.PROJECTS_NONE,), plan=found)
+    else:
+        answer = Answer(_update_all_outcome(found),
+                        tuple(report.update_all_report(found, dry_run=dry_run)),
+                        plan=found)
+    emit(answer.lines)
+    return answer
+
+
+def _cmd_upgrade_all(args) -> int:
+    return update_all_step(dry_run=args.dry_run, emit=_emit).outcome
 
 
 # --- adopt ------------------------------------------------------------
@@ -442,6 +499,22 @@ def _cmd_connect(args, root: Path) -> int:
     return NOOP if result.current else OK
 
 
+def orphan_step(client: str, key: str, *, dry_run: bool, emit=_quiet) -> Answer:
+    """`radialrig unconnect <client> --orphan <key>`, for the verb and the
+    page's press. An orphan names no project, so neither keeps a side
+    entry; a key no copy carries answers the no-op code."""
+    plan = (orphan.remove_plan if dry_run else orphan.remove)(client, key)
+    if not plan.found:
+        answer = Answer(NOOP, tuple(report.orphan_not_found_report(plan.client, plan.key)))
+    else:
+        answer = Answer(OK if plan.complete else PARTIAL,
+                        tuple(report.orphan_report(
+                            plan, resolve=orphan.reason_text, dry_run=dry_run)),
+                        plan.dispositions)
+    emit(answer.lines)
+    return answer
+
+
 def _cmd_unconnect_orphan(args) -> int:
     if args.client is None:
         return _fail(report.ORPHAN_NO_CLIENT)
@@ -449,9 +522,9 @@ def _cmd_unconnect_orphan(args) -> int:
         _emit(report.orphan_refused_report(
             report.ORPHAN_NO_PATH, dry_run=args.dry_run))
         return REFUSED
-    build = orphan.remove_plan if args.dry_run else orphan.remove
     try:
-        plan = build(args.client, args.orphan)
+        return orphan_step(args.client, args.orphan, dry_run=args.dry_run,
+                           emit=_emit).outcome
     except cn.UnknownClient as exc:
         for line in report.connect_unknown_client_report(exc.name, exc.available):
             _fail(line)
@@ -461,12 +534,22 @@ def _cmd_unconnect_orphan(args) -> int:
         return REFUSED
     except cn.ConnectError as exc:
         return _fail(str(exc))
-    if not plan.found:
-        _emit(report.orphan_not_found_report(plan.client, plan.key))
-        return NOOP
-    _emit(report.orphan_report(
-        plan, resolve=orphan.reason_text, dry_run=args.dry_run))
-    return OK if plan.complete else PARTIAL
+
+
+def unconnect_step(root: Path, client: str, *, dry_run: bool, emit=_quiet) -> Answer:
+    """`radialrig unconnect <client>`, for the verb and the page's press.
+    A project with no record answers the no-op code, and keeps the side
+    entry as a real run does."""
+    plan = (cn.unconnect_plan if dry_run else cn.unconnect)(root, client)
+    if not plan.connected:
+        answer = Answer(NOOP, tuple(report.connect_not_connected_report(root, plan.client)))
+    else:
+        answer = Answer(OK if plan.complete else PARTIAL,
+                        tuple(report.unconnect_report(plan, dry_run=dry_run)),
+                        plan.dispositions)
+    emit(answer.lines)
+    ro.record_seen(root, dry_run=dry_run)
+    return answer
 
 
 def _cmd_unconnect(args, root: Path) -> int:
@@ -476,21 +559,14 @@ def _cmd_unconnect(args, root: Path) -> int:
         sys.stdout.write(USAGE)
         return OK
     try:
-        build = cn.unconnect_plan if args.dry_run else cn.unconnect
-        plan = build(root, args.client)
+        return unconnect_step(root, args.client, dry_run=args.dry_run,
+                              emit=_emit).outcome
     except cn.UnknownClient as exc:
         for line in report.connect_unknown_client_report(exc.name, exc.available):
             _fail(line)
         return ERROR
     except cn.ConnectError as exc:
         return _fail(str(exc))
-    if not plan.connected:
-        _emit(report.connect_not_connected_report(root, plan.client))
-        ro.record_seen(root, dry_run=args.dry_run)
-        return NOOP
-    _emit(report.unconnect_report(plan, dry_run=args.dry_run))
-    ro.record_seen(root, dry_run=args.dry_run)
-    return OK if plan.complete else PARTIAL
 
 
 # --- setup ------------------------------------------------------------

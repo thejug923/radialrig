@@ -72,9 +72,6 @@ class Surface:
     async def search_history(self, query: str) -> dict[str, Any]:
         return await self.call("search_history", {"query": query})
 
-    async def check_docs(self) -> dict[str, Any]:
-        return await self.call("check_docs")
-
     async def get_guidance(self, topic: str | None = None) -> dict[str, Any]:
         args: dict[str, Any] = {}
         if topic is not None:

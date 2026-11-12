@@ -1,4 +1,4 @@
-"""Suite-wide isolation of the per-user profile variables.
+"""Suite-wide setup: the profile isolation, and the starting project.
 
 PLAN-0008 Phase 3, widened by PLAN-0009 Phase 2. The roster lives at a
 path built from the `STORES` row serving this platform, and the connect
@@ -21,11 +21,18 @@ reverse.
 manage page's uv paths and the connect kit's config-directory lookup
 inside tmp_path. On Windows `Path.home()` reads `USERPROFILE`, which
 stays real: nothing in the product builds a written path from it.
+
+`project` is the starting project most test files mount into, kept here
+so each file takes it by name rather than writing it out.
 """
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
+
+from radialrig.tests.test_mount import _make_project
 
 PROFILE_VARS = ("APPDATA", "LOCALAPPDATA", "HOME", "XDG_DATA_HOME")
 
@@ -35,3 +42,11 @@ def isolated_profile(tmp_path, monkeypatch):
     """Point the per-user profile variables inside this test's tmp_path."""
     for name in PROFILE_VARS:
         monkeypatch.setenv(name, str(tmp_path / "profile" / name.lower()))
+
+
+@pytest.fixture()
+def project(tmp_path) -> Path:
+    """A fixture project with no git history: the tests that take it do
+    not need one, and `git init` in every case would dominate the run.
+    test_mount's `host` is the git-backed one."""
+    return _make_project(tmp_path / "sample-project")

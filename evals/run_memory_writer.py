@@ -79,7 +79,6 @@ from run_memory_ablation import (  # noqa: E402
     fisher_two_sided,
     install_skill,
     run_print,
-    scratch_profile,
     tree_digests,
 )
 

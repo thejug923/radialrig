@@ -149,7 +149,6 @@ CONNECT_NO_COMMAND_TEMPLATE = (
     "RadialRig app and any manage page before that install, they hold the "
     "executables it replaces"
 )
-CONNECT_NO_COMMAND = CONNECT_NO_COMMAND_TEMPLATE.format(command="radialrig-read")
 
 
 def connect_no_command(command: str) -> str:
@@ -848,8 +847,9 @@ PROJECTS_MISMATCH_TAIL = (
 
 # The one connected value that has a remedy, and the spelling the
 # machine-readable line carries for it. This module owns that line's
-# vocabulary — `mounted=`, `skills=`, and this — so the word stands once
-# on each side of a boundary that runs one way.
+# vocabulary: `mounted=`, `skills=`, and this. The roster's state takes
+# this spelling from here (`roster.CONNECTED_MISMATCH`), so the word is
+# written once. The roster imports this module, never the other way.
 PROJECTS_MISMATCH = "mismatch"
 
 

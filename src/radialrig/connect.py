@@ -167,9 +167,8 @@ class WriteStopped(ConnectError):
 
     def __init__(self, path, reason: str, left=()) -> None:
         self.path = str(path) if path else ""
-        self.reason = reason
         self.left = tuple(str(p) for p in left)
-        super().__init__(mnt.stopped_sentence(self.path, self.reason, self.left))
+        super().__init__(mnt.stopped_sentence(self.path, reason, self.left))
 
 
 def _stopped(exc: OSError, *, path=None, left=()) -> WriteStopped:
@@ -430,6 +429,95 @@ def _entries(root: Path, client: Client, scope: str, *, command: str | None) -> 
         entry_key(client, scope): _entry(root, command=command),
         write_entry_key(client, scope): _write_entry(root, command=command),
     }
+
+
+# --- reading a JSON file that may be missing or damaged ---------------
+
+# What a read of one JSON file answered. Absence and damage are different
+# verdicts: a file that is not there held nothing, and a file that does
+# not parse might hold anything.
+ABSENT = object()
+UNREADABLE = object()
+
+
+def read_json(path: Path, *, object_only: bool = False):
+    """One file's JSON, `ABSENT`, or `UNREADABLE`.
+
+    A file error, or text that is not JSON, answers `UNREADABLE` and is
+    not raised. With `object_only`, JSON that is not an object answers
+    `UNREADABLE` too; without it any JSON value comes back and the caller
+    checks its shape.
+
+    Deliberately not `_readable_record`: that one guards a write and
+    refuses. A caller here describes a file it will not write through, so
+    those guards would refuse files it is meant to describe, and would
+    raise where a listing has no way to report an error.
+    """
+    try:
+        if not path.is_file():
+            return ABSENT
+        text = path.read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return UNREADABLE
+    try:
+        loaded = json.loads(text)
+    except ValueError:
+        return UNREADABLE
+    if object_only and not isinstance(loaded, dict):
+        return UNREADABLE
+    return loaded
+
+
+# --- reading back the root an entry pins ------------------------------
+# The projects listing and the orphan removal both ask these, of the same
+# copies. One answer for both is what keeps the listing from offering a
+# removal the verb would refuse.
+
+def pinned_root(entry) -> str:
+    """The project root one settings entry pins, "" when it pins none.
+
+    The read side of `_entry`: a connect pins the root in the entry's
+    environment, and this reads it back from there.
+    """
+    if not isinstance(entry, dict):
+        return ""
+    entry_env = entry.get("env")
+    if not isinstance(entry_env, dict):
+        return ""
+    pinned = entry_env.get(ROOT_ENV)
+    return pinned if isinstance(pinned, str) else ""
+
+
+def stands(root: str) -> bool:
+    """Whether the path one settings entry pins is still on disk."""
+    try:
+        return Path(root).exists()
+    except (OSError, ValueError):  # pragma: no cover - a path this OS rejects
+        return False
+
+
+PINS_STAND = "stand"         # some copy pins a root that is still on disk
+PINS_UNPINNED = "unpinned"   # no pinned root stands, and some copy pins none
+PINS_GONE = "gone"           # every copy pins a root, and none of them stands
+
+
+def pins_verdict(pins) -> tuple[str, str]:
+    """What one key's pins show, taken over every copy that carries it.
+
+    `pins` holds one `pinned_root` answer per copy, in copy order, and is
+    never empty. One key is decided once and never copy by copy. A key
+    any copy pins to a standing root is not an orphan anywhere, and the
+    root answered is the first such root. Failing that, a key any copy
+    pins to nothing cannot be shown to be an orphan, and the root
+    answered is "". Otherwise the key is an orphan, and the root answered
+    is the first copy's.
+    """
+    for root in pins:
+        if root and stands(root):
+            return PINS_STAND, root
+    if not all(pins):
+        return PINS_UNPINNED, ""
+    return PINS_GONE, pins[0]
 
 
 def _recorded_entries(body: dict) -> dict[str, dict]:

@@ -26,7 +26,7 @@ from radialrig import mount as mnt
 from radialrig import report
 from radialrig import setup_web
 from radialrig import skills as sk
-from radialrig.tests.test_mount import MOUNT_DAY, _make_project, tree
+from radialrig.tests.test_mount import MOUNT_DAY, tree
 from radialrig.tests.test_skills import INSTALL_DAY, SKILL
 from radialrig.tests.test_unmount import crlf, marks
 from radialrig.tests.test_upgrade import (  # noqa: F401 - next_release is a fixture
@@ -41,11 +41,6 @@ from radialrig.tests.test_upgrade import (  # noqa: F401 - next_release is a fix
 CODEX = ".codex/config.toml"
 OURS = b'model = "gpt-5"\n\n[mcp_servers.other]\ncommand = "other-server"\n'
 WRITE_TABLE = f"[mcp_servers.{mnt.WRITE_SERVER_KEY}]".encode("utf-8")
-
-
-@pytest.fixture()
-def project(tmp_path) -> Path:
-    return _make_project(tmp_path / "sample-project")
 
 
 @pytest.fixture()

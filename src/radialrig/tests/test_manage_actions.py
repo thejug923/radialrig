@@ -32,6 +32,7 @@ from pathlib import Path
 
 import pytest
 
+from radialrig import cli
 from radialrig import connect as cn
 from radialrig import manage_web
 from radialrig import mount as mnt
@@ -60,6 +61,7 @@ from radialrig.tests.test_manage_web import (  # noqa: F401 - helpers, by name
     run,
     text_of,
 )
+from radialrig.tests.test_connect import fake_client, roaming_config, store_config
 from radialrig.tests.test_setup_web import UNSAFE
 from radialrig.tests.test_mount import (  # noqa: F401 - helpers, by name
     MOUNT_DAY,
@@ -138,10 +140,6 @@ def action_of(fields: dict) -> manage_web.Action:
 # The first agent in the harness map, for the presses that name one
 # (PLAN-0015 phase 2). Read off the map rather than spelled here.
 AGENT = next(iter(sk.HARNESSES))
-
-
-def main_of(page: str) -> str:
-    return page.split("<main>", 1)[-1].split("</main>", 1)[0]
 
 
 def says(page: str, lines) -> None:
@@ -1420,9 +1418,7 @@ def test_a_slot_no_quoting_rule_makes_safe_offers_no_copy_line_on_this_page(
 import dataclasses as dc  # noqa: E402
 
 from radialrig import update  # noqa: E402
-from radialrig.tests.test_manage_web import FACT_BLOCK as _FACT_BLOCK  # noqa: E402,F401
 from radialrig.tests.test_manage_web import (  # noqa: E402,F401 - helpers, by name
-    AGENT_LIST,
     PRIMARY,
     agent_lists,
     main_of,
@@ -1745,3 +1741,237 @@ def test_the_update_all_page_draws_each_projects_agents_under_their_own_headings
         assert "docs/spec.md" in alpha
         assert text_of(page).count(report.ENGINE_HALF) == 1
     assert run_.running
+
+
+# --- PLAN-0025 phase 2, group 3: every press's answer to its kit's errors
+# Each press runs one engine call and reads a kit error as one page state.
+# The call is replaced by one that raises, rehearsed and run alike, so each
+# rung of each press's ladder is pinned without a disk that fails. A
+# stopped write is a `MountError` or a `ConnectError` too, which is why the
+# order of the rungs matters: read after them, a partial stop would show
+# as a plain failure.
+
+LEFT_BEHIND = ("C:/stand-in/claude_desktop_config.json",)
+CONFLICTS = (mnt.Disposition(f".claude/skills/{SKILL}/", mnt.LEFT, mnt.SKILL_DIR_FOREIGN),)
+
+
+def _raising(exc):
+    def raise_(*args, **kwargs):
+        raise exc
+    return raise_
+
+
+def _skill_stop():
+    """A skills-kit error carrying a stopped write as its cause."""
+    exc = sk.SkillError("the skill stopped")
+    exc.__cause__ = mnt.WriteStopped("C:/stand-in/SKILL.md", "denied", LEFT_BEHIND)
+    return exc
+
+
+PRESS_CALLS = {
+    manage_web.UNMOUNT: ((mnt, "unmount_plan"), (mnt, "unmount")),
+    manage_web.UPDATE: ((update, "plan"), (update, "run")),
+    manage_web.UNCONNECT: ((cn, "unconnect_plan"), (cn, "unconnect")),
+    manage_web.ORPHAN: ((orphan, "remove_plan"), (orphan, "remove")),
+    manage_web.CONNECT: ((cn, "connect_plan"), (cn, "connect")),
+    manage_web.SKILL_ADD: ((sk, "add_all_plan"), (sk, "add_all")),
+    manage_web.SKILL_ADD_ALL: ((sk, "add_catalog_plan"), (sk, "add_catalog")),
+    manage_web.SKILL_REMOVE: ((sk, "remove_all_plan"), (sk, "remove_all")),
+}
+MOUNT_KIT = (manage_web.UNMOUNT, manage_web.UPDATE)
+CLIENT_KIT = (manage_web.UNCONNECT, manage_web.ORPHAN, manage_web.CONNECT)
+SKILL_KIT = (manage_web.SKILL_ADD, manage_web.SKILL_ADD_ALL, manage_web.SKILL_REMOVE)
+
+# (presses, the error, what the state says: "partial", "failed" or "refused")
+KIT_ERRORS = [
+    *((name, lambda: mnt.WriteStopped("C:/x", "denied", LEFT_BEHIND), "partial")
+      for name in MOUNT_KIT + CLIENT_KIT + SKILL_KIT),
+    *((name, lambda: cn.WriteStopped("C:/x", "denied", LEFT_BEHIND), "partial")
+      for name in MOUNT_KIT + CLIENT_KIT + SKILL_KIT),
+    *((name, lambda: mnt.WriteStopped("C:/x", "denied"), "failed") for name in MOUNT_KIT),
+    *((name, lambda: cn.WriteStopped("C:/x", "denied"), "failed") for name in CLIENT_KIT),
+    *((name, lambda: mnt.MountError("the record could not be read"), "failed")
+      for name in MOUNT_KIT),
+    *((name, lambda: cn.ConnectError("the settings could not be read"), "failed")
+      for name in CLIENT_KIT),
+    *((name, lambda: cn.UnknownClient("no-such-client", ("a", "b")), "failed")
+      for name in CLIENT_KIT),
+    (manage_web.CONNECT, lambda: cn.ConnectRefused(cn.CLIENTS[CLIENT], CONFLICTS), "refused"),
+    (manage_web.ORPHAN, lambda: orphan.OrphanRefused("that project still stands"), "refused"),
+    *((name, lambda: sk.SkillError("the skill could not be read"), "failed")
+      for name in SKILL_KIT),
+    *((name, _skill_stop, "partial") for name in SKILL_KIT),
+    *((name, lambda: sk.UnknownSkill("no-such-skill", ("a",)), "failed") for name in SKILL_KIT),
+    *((name, lambda: sk.SkillConflict(CONFLICTS), "refused") for name in SKILL_KIT),
+]
+
+
+@pytest.mark.parametrize("name, make, says", KIT_ERRORS)
+def test_every_press_reads_its_kits_errors_as_the_page_says_them(
+    name, make, says, tmp_path, monkeypatch,
+):
+    exc = make()
+    for module, attr in PRESS_CALLS[name]:
+        monkeypatch.setattr(module, attr, _raising(exc))
+    monkeypatch.setattr(mnt, "is_mounted", lambda root: True)
+    root = tmp_path.resolve()
+    act = manage_web.Action(
+        name, root=str(root), skill=SKILL, client=CLIENT, key=f"{PREFIX}gone")
+    for dry_run in (True, False):
+        state = manage_web.RUNNERS[name](act, dry_run=dry_run)
+        if says == "partial":
+            assert state == setup_web.PageState(
+                manage_web.FAILED, report.PARTIAL, False, result=act,
+                lines=(setup_web.PARTIAL_HEAD,), message=str(exc)), (name, dry_run)
+        elif says == "failed":
+            if isinstance(exc, cn.UnknownClient):
+                message = "; ".join(report.connect_unknown_client_report(exc.name, exc.available))
+            elif isinstance(exc, sk.UnknownSkill):
+                message = "; ".join(report.skill_unknown_report(exc.name, exc.available))
+            else:
+                message = str(exc)
+            assert state == setup_web.PageState(
+                manage_web.FAILED, report.ERROR, False, result=act,
+                message=message), (name, dry_run)
+        else:
+            if isinstance(exc, cn.ConnectRefused):
+                lines = report.connect_refused_report(
+                    exc.client, root, exc.conflicts, dry_run=dry_run)
+            elif isinstance(exc, orphan.OrphanRefused):
+                lines = report.orphan_refused_report(str(exc), dry_run=dry_run)
+            else:
+                lines = report.skill_conflict_report(exc.conflicts, dry_run=dry_run)
+            conflicts = () if isinstance(exc, orphan.OrphanRefused) else CONFLICTS
+            assert state == setup_web.PageState(
+                manage_web.REFUSED, report.REFUSED, False, dispositions=conflicts,
+                lines=manage_web._sentences(lines, conflicts), result=act), (name, dry_run)
+
+
+def test_a_press_with_nothing_to_do_answers_the_no_op_code(tmp_path, env, command):
+    """The command line's exit 4 for the same press, on the page's state:
+    nothing mounted to unmount or update, nothing registered to remove."""
+    untouched = _make_project(tmp_path / "untouched").resolve()
+    for name in (manage_web.UNMOUNT, manage_web.UPDATE, manage_web.UNCONNECT):
+        act = manage_web.Action(name, root=str(untouched), client=CLIENT)
+        for dry_run in (True, False):
+            state = manage_web.RUNNERS[name](act, dry_run=dry_run)
+            assert (state.kind, state.outcome) == (
+                manage_web.PLAN if dry_run else manage_web.DONE, report.NOOP), (name, dry_run)
+
+
+def test_unmount_and_unconnect_list_the_project_only_when_run(tmp_path, env, command):
+    """Unmount and unconnect keep the roster's side entry on a real run
+    and on their already-done exits, and a rehearsal writes none. The
+    projects are mounted and connected through the engine, which keeps no
+    side entry, so the listing starts without them."""
+    mounted = _make_project(tmp_path / "mounted").resolve()
+    mnt.mount(mounted)
+    connected = _make_project(tmp_path / "connected").resolve()
+    mnt.mount(connected)
+    cn.connect(connected, CLIENT)
+    presses = [(manage_web.UNMOUNT, mounted), (manage_web.UNCONNECT, connected)]
+    for name in (manage_web.UNMOUNT, manage_web.UNCONNECT):
+        presses.append((name, _make_project(tmp_path / f"untouched-{name}").resolve()))
+    for name, root in presses:
+        act = manage_web.Action(name, root=str(root), client=CLIENT)
+        manage_web.RUNNERS[name](act, dry_run=True)
+        assert str(root) not in [state.root for state in ro.listing()], (name, root.name)
+        manage_web.RUNNERS[name](act, dry_run=False)
+        assert str(root) in [state.root for state in ro.listing()], (name, root.name)
+
+
+def test_an_unmount_press_answers_in_the_reports_code_rows_and_lines(tmp_path, env):
+    """An unmount that leaves an edited file, rehearsed and run: the
+    partial code, the plan's rows, and the report's own lines."""
+    root = _make_project(tmp_path / "host").resolve()
+    mnt.mount(root)
+    (root / "docs" / "spec.md").write_bytes(b"# ours now\n")
+    plan = mnt.unmount_plan(root)
+    assert not plan.complete and plan.dispositions
+    act = manage_web.Action(manage_web.UNMOUNT, root=str(root))
+    for dry_run in (True, False):
+        state = manage_web.RUNNERS[manage_web.UNMOUNT](act, dry_run=dry_run)
+        assert state == setup_web.PageState(
+            manage_web.PLAN if dry_run else manage_web.DONE, report.PARTIAL, False,
+            dispositions=plan.dispositions,
+            lines=manage_web._sentences(
+                cli._unmount_report(plan, dry_run=dry_run), plan.dispositions),
+            result=act), dry_run
+
+
+def test_an_orphan_press_answers_in_the_reports_code_rows_and_lines(tmp_path, monkeypatch):
+    """A key no copy carries is the no-op code and the not-found
+    sentence. A key one copy carries, beside a copy that does not read,
+    is removed where it can be and the other copy is left: the partial
+    code, the plan's rows, and the report's lines in the orphan kit's
+    own wording."""
+    mapping = fake_client(tmp_path, store=True)
+    for name, value in mapping.items():
+        monkeypatch.setenv(name, value)
+    key = f"{PREFIX}old"
+    body = {"mcpServers": {key: {"command": "x", "args": [],
+                                 "env": {ROOT_ENV: str(tmp_path / "vanished")}}}}
+    roaming_config(mapping).write_bytes((json.dumps(body, indent=2) + "\n").encode("utf-8"))
+    store_config(mapping).write_bytes(b"\xff\xfe not text\n")
+
+    missing = manage_web.Action(manage_web.ORPHAN, client=CLIENT, key=f"{PREFIX}none")
+    for dry_run in (True, False):
+        state = manage_web.RUNNERS[manage_web.ORPHAN](missing, dry_run=dry_run)
+        assert state == setup_web.PageState(
+            manage_web.PLAN if dry_run else manage_web.DONE, report.NOOP, False,
+            lines=manage_web._sentences(
+                report.orphan_not_found_report(cn.CLIENTS[CLIENT], missing.key), ()),
+            result=missing), dry_run
+
+    plan = orphan.remove_plan(CLIENT, key)
+    assert plan.found and not plan.complete and plan.dispositions
+    act = manage_web.Action(manage_web.ORPHAN, client=CLIENT, key=key)
+    for dry_run in (True, False):
+        state = manage_web.RUNNERS[manage_web.ORPHAN](act, dry_run=dry_run)
+        assert state == setup_web.PageState(
+            manage_web.PLAN if dry_run else manage_web.DONE, report.PARTIAL, False,
+            dispositions=plan.dispositions,
+            lines=manage_web._sentences(report.orphan_report(
+                plan, resolve=orphan.reason_text, dry_run=dry_run), plan.dispositions),
+            result=act), dry_run
+
+
+def test_an_update_press_answers_in_the_reports_code_rows_and_lines(
+    tmp_path, env, newer_release, fixed_day,
+):
+    """One project's update with an edited skill left for review,
+    rehearsed and run: the partial code, both halves' rows, and the
+    report's own lines for a rehearsal and for a run."""
+    roots = seed_projects(tmp_path / "page")
+    newer_release(seed_edit=edit_spec, skill_edit=edit_skill)
+    finish_projects(roots)
+    act = manage_web.Action(manage_web.UPDATE, root=str(roots["gamma"]))
+    for dry_run in (True, False):
+        state = manage_web.RUNNERS[manage_web.UPDATE](act, dry_run=dry_run)
+        plan = state.result[1]
+        assert update_rows(plan), dry_run
+        assert (state.kind, state.outcome, state.dispositions, state.lines) == (
+            manage_web.UPDATE_PLAN if dry_run else manage_web.UPDATED, report.PARTIAL,
+            tuple(update_rows(plan)), tuple(report.update_report(plan, dry_run=dry_run)),
+        ), dry_run
+
+
+def test_an_update_all_press_answers_in_the_reports_code_and_lines(
+    tmp_path, env, newer_release, fixed_day,
+):
+    """Every listed project's update: with nothing listed, the no-op code
+    and the one sentence; with a project whose edited skill is left for
+    review, the worst project's code and the report's own lines."""
+    act = manage_web.Action(manage_web.UPDATE_ALL)
+    for dry_run in (True, False):
+        state = manage_web.RUNNERS[manage_web.UPDATE_ALL](act, dry_run=dry_run)
+        assert (state.outcome, state.lines) == (report.NOOP, (report.PROJECTS_NONE,)), dry_run
+    roots = seed_projects(tmp_path / "page")
+    newer_release(seed_edit=edit_spec, skill_edit=edit_skill)
+    finish_projects(roots)
+    list_projects(roots)
+    for dry_run in (True, False):
+        state = manage_web.RUNNERS[manage_web.UPDATE_ALL](act, dry_run=dry_run)
+        found = state.result[1]
+        assert (state.outcome, state.lines) == (
+            report.PARTIAL, tuple(report.update_all_report(found, dry_run=dry_run))), dry_run

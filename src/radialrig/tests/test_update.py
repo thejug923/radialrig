@@ -27,7 +27,9 @@ from radialrig import mount as mnt
 from radialrig import report
 from radialrig import roster as ro
 from radialrig import skills as sk
+from radialrig import update
 from radialrig.paths import packaged_seed
+from radialrig.tests.test_connect import run
 from radialrig.tests.test_mount import (  # noqa: F401 - fixtures are used by name
     MOUNT_DAY,
     NEXT_VERSION,
@@ -36,20 +38,13 @@ from radialrig.tests.test_mount import (  # noqa: F401 - fixtures are used by na
 )
 from radialrig.tests.test_skills import (
     INSTALL_DAY,
-    RECORD_REL,
     SKILL,
-    SKILL_DIR,
     edit_skill,
     record_of,
 )
 from radialrig.tests.test_upgrade import edit_spec
 
 UPDATE_DAY = dt.date(2026, 10, 2)
-
-
-@pytest.fixture()
-def project(tmp_path) -> Path:
-    return _make_project(tmp_path / "sample-project")
 
 
 @pytest.fixture()
@@ -385,12 +380,6 @@ def test_every_skill_left_for_review_counts_toward_exit_five_and_a_current_one_d
 OTHER = "plan-review"
 
 
-def run(capsys, *argv) -> tuple[int, str, str]:
-    code = cli.main(list(argv))
-    captured = capsys.readouterr()
-    return code, captured.out, captured.err
-
-
 def closing_line(out: str) -> str:
     return next(line for line in out.splitlines() if "file(s) applied" in line)
 
@@ -501,6 +490,24 @@ def test_a_skills_half_that_fails_after_the_seed_is_written_is_reported(
     assert f"{mnt.UPDATED:<9} docs/spec.md" in out
     assert report.UPDATE_SKILLS_FAILED.format(error=sentence) in out
     assert "Skills for" not in out
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_an_engine_error_in_the_upgrade_is_one_line_on_stderr(
+    project, capsys, monkeypatch, dry_run,
+):
+    """A mount-kit error from the update, rehearsed or run, is one line on
+    stderr and the error code, with nothing on stdout."""
+    ready(project)
+
+    def stopped(root):
+        raise mnt.MountError("the seed could not be read")
+
+    monkeypatch.setattr(update, "plan", stopped)
+    monkeypatch.setattr(update, "run", stopped)
+    code, out, err = run(capsys, "upgrade", *(["--dry-run"] if dry_run else []),
+                         str(project))
+    assert (code, out, err) == (cli.ERROR, "", "radialrig: the seed could not be read\n")
 
 
 def test_upgrade_all_reports_each_listed_project_and_names_the_skipped(

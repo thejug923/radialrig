@@ -24,8 +24,6 @@ from radialrig.tests.test_mount import (  # noqa: F401 - fixtures are used by na
     EXPECTED,
     MOUNT_DAY,
     _make_project,
-    host,
-    snapshot,
     tree,
 )
 
@@ -41,23 +39,12 @@ SEEDED_MD = (
 )
 
 
-@pytest.fixture()
-def project(tmp_path) -> Path:
-    """A fixture project with no git history: the round trip does not
-    need one, and `git init` in every case would dominate the run."""
-    return _make_project(tmp_path / "sample-project")
-
-
 def marks(plan) -> dict[str, tuple[str, str]]:
     return {d.path: (d.verb, d.code) for d in plan.dispositions}
 
 
 def detail(plan, path: str) -> str:
     return next(d.detail for d in plan.dispositions if d.path == path)
-
-
-def left_paths(plan) -> set[str]:
-    return {d.path for d in plan.dispositions if d.verb in (mnt.LEFT, mnt.EXCISED)}
 
 
 def files_now(root: Path) -> set[str]:

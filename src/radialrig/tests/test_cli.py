@@ -11,6 +11,7 @@ exit codes, refusals that write nothing, and the closed report vocabulary.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -25,6 +26,7 @@ from radialrig import report
 from radialrig import roster as ro
 from radialrig import skills as sk
 from radialrig import validate_docs
+from radialrig.tests.test_connect import run, unset
 from radialrig.tests.test_mount import (  # noqa: F401 - fixtures are used by name
     EXPECTED,
     MOUNT_DAY,
@@ -70,8 +72,13 @@ def no_real_client(monkeypatch):
     means a test that forgets to inject a fake profile finds nothing and
     errors, rather than editing a real settings file.
     """
-    for name in ("APPDATA", "LOCALAPPDATA"):
-        monkeypatch.delenv(name, raising=False)
+    unset(monkeypatch, "APPDATA", "LOCALAPPDATA")
+
+
+def test_no_real_client_leaves_the_profile_variables_absent():
+    """Absent, not pointed at an empty folder as conftest.py leaves them."""
+    assert "APPDATA" not in os.environ
+    assert "LOCALAPPDATA" not in os.environ
 
 
 @pytest.fixture()
@@ -87,19 +94,8 @@ def client_here(tmp_path, monkeypatch) -> Path:
     return roaming / "Claude" / "claude_desktop_config.json"
 
 
-@pytest.fixture()
-def project(tmp_path) -> Path:
-    return _make_project(tmp_path / "sample-project")
-
-
 def block(text: str) -> list[str]:
     return [line for line in text.splitlines() if BLOCK_LINE.match(line)]
-
-
-def run(capsys, *argv) -> tuple[int, str, str]:
-    code = cli.main(list(argv))
-    captured = capsys.readouterr()
-    return code, captured.out, captured.err
 
 
 # --- A1-A7: the three outcomes of mount -------------------------------
