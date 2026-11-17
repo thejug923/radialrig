@@ -34,7 +34,9 @@ import pytest
 
 from radialrig.tests.test_mount import _make_project
 
-PROFILE_VARS = ("APPDATA", "LOCALAPPDATA", "HOME", "XDG_DATA_HOME")
+# `CODEX_HOME` keeps `radialrig projects` off this developer's own Codex
+# settings (PLAN-0026 phase 5): on Windows `Path.home()` stays real.
+PROFILE_VARS = ("APPDATA", "LOCALAPPDATA", "HOME", "XDG_DATA_HOME", "CODEX_HOME")
 
 
 @pytest.fixture(autouse=True)

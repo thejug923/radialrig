@@ -182,7 +182,7 @@ def test_projects_lists_verified_state_in_closed_verbs(
     assert rows[0].split()[0] == mnt.CURRENT
     assert str(project.resolve()) in rows[0]
     assert rows[0].endswith(
-        f"mounted; registered with {LABEL}; skills: {SKILL}")
+        f"mounted; registered with {LABEL}; skills: {SKILL}; {ro.CODEX_UNKNOWN}")
     for line in rows:
         assert line.split()[0] in mnt.VERBS, line
     assert report.PROJECTS_NONE not in out
@@ -206,7 +206,7 @@ def test_a_skill_one_agent_has_reads_per_agent_on_the_row(
     row = block(out)[0]
     assert row.endswith(
         f"mounted; registered with {LABEL}; {first.label} skills: {SKILL}; "
-        f"{second.label} skills: none")
+        f"{second.label} skills: none; {ro.CODEX_UNKNOWN}")
     assert "harness" not in out.lower()
     code, porcelain, _ = run(capsys, "projects", "--porcelain")
     assert code == 0
@@ -215,7 +215,8 @@ def test_a_skill_one_agent_has_reads_per_agent_on_the_row(
     assert run(capsys, "skill", "add", SKILL, str(project),
                "--harness", second.name)[0] == 0
     code, out, _ = run(capsys, "projects")
-    assert block(out)[0].endswith(f"registered with {LABEL}; skills: {SKILL}")
+    assert block(out)[0].endswith(
+        f"registered with {LABEL}; skills: {SKILL}; {ro.CODEX_UNKNOWN}")
 
 
 def test_the_mismatch_row_carries_all_three_facets(
@@ -232,7 +233,8 @@ def test_the_mismatch_row_carries_all_three_facets(
     # The clause names the client the record claims (PLAN-0014 phase 3),
     # filled from the table; the porcelain line below keeps its word.
     assert row.endswith(
-        f"mounted; {ro.MISMATCH_CLAUSE.format(label=LABEL)}; skills: {SKILL}")
+        f"mounted; {ro.MISMATCH_CLAUSE.format(label=LABEL)}; skills: {SKILL}; "
+        f"{ro.CODEX_UNKNOWN}")
     assert f"{LABEL}'s settings no longer carry" in row
     assert "{label}" not in out
     # The command line's tail keeps its placeholders, as it always has.
@@ -389,6 +391,93 @@ def test_orphans_are_named(tmp_path, env, client_here, command, capsys):
 
 
 # --- the machine-readable line ----------------------------------------
+
+@pytest.mark.parametrize("settings, said", [
+    ("trusted", ro.CODEX_TRUSTED),
+    ("untrusted", ro.CODEX_UNTRUSTED),
+    ("no entry", ro.CODEX_UNTRUSTED),
+    ("unreadable", ro.CODEX_UNKNOWN),
+])
+def test_the_row_says_whether_codex_trusts_the_project(
+    tmp_path, env, client_here, command, capsys, monkeypatch, settings, said,
+):
+    """PLAN-0026 phase 5: the row reads Codex's own settings, on a scratch
+    profile, and writes nothing to them; the machine line is unchanged."""
+    project = registered(capsys, _make_project(tmp_path / "alpha"))
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    # The key as Codex writes it on this system: lowercased with
+    # backslashes on Windows, the path as it is on Linux.
+    key = os.path.normcase(str(project.resolve()))
+    text = {
+        "trusted": f"[projects.'{key}']\ntrust_level = \"trusted\"\n",
+        "untrusted": f"[projects.'{key}']\ntrust_level = \"untrusted\"\n",
+        "no entry": "[projects.'/somewhere/else']\ntrust_level = \"trusted\"\n",
+        "unreadable": "[projects.'\n",
+    }[settings]
+    config = home / "config.toml"
+    config.write_text(text, encoding="utf-8")
+
+    code, out, _ = run(capsys, "projects")
+    assert code == 0
+    assert block(out)[0].endswith(f"; {said}")
+    assert config.read_text(encoding="utf-8") == text
+    code, porcelain, _ = run(capsys, "projects", "--porcelain")
+    assert porcelain == porcelain_line(project, "yes", CLIENT, "none")
+
+
+def _fake_repository(main: Path) -> None:
+    # Codex counts a `.git` folder as a repository only when it holds
+    # HEAD; nothing here runs git.
+    (main / ".git").mkdir(parents=True)
+    (main / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+
+
+def _fake_worktree(main: Path, tree: Path) -> None:
+    # The files `git worktree add` leaves, made by hand: the tree's `.git`
+    # file names its admin folder, whose `commondir` leads back to the
+    # main repository's `.git`.
+    admin = main / ".git" / "worktrees" / tree.name
+    admin.mkdir(parents=True)
+    (admin / "commondir").write_text("../..\n", encoding="utf-8")
+    tree.mkdir(parents=True)
+    (tree / ".git").write_text(f"gitdir: {admin}\n", encoding="utf-8")
+
+
+@pytest.mark.parametrize("layout, said", [
+    ("folder inside a trusted repository", ro.CODEX_TRUSTED),
+    ("worktree of a trusted repository", ro.CODEX_TRUSTED),
+    ("own entry before the repository's", ro.CODEX_UNTRUSTED),
+])
+def test_the_row_reads_trust_where_codex_looks_for_it(tmp_path, layout, said):
+    """PLAN-0026 phase 6 review (O-1, G-1): Codex tries the folder itself,
+    then the nearest folder holding `.git`, then a linked worktree's main
+    repository, and the first entry it finds decides. The row reads the
+    same places, from the file system alone."""
+    main = tmp_path / "repo"
+    _fake_repository(main)
+    if layout.startswith("worktree"):
+        project = tmp_path / "repo-tree"
+        _fake_worktree(main, project)
+    else:
+        project = main / "app"
+        project.mkdir()
+    home = tmp_path / "codex-home"
+    home.mkdir()
+
+    def entry(folder: Path, level: str) -> str:
+        key = os.path.normcase(str(folder.resolve()))
+        return f"[projects.'{key}']\ntrust_level = \"{level}\"\n"
+
+    text = entry(main, "trusted")
+    if layout.startswith("own entry"):
+        text = entry(project, "untrusted") + text
+    (home / "config.toml").write_text(text, encoding="utf-8")
+
+    trust = ro.codex_trust(env={"CODEX_HOME": str(home)})
+    assert trust(str(project.resolve())) == said
+
 
 def test_porcelain_is_pinned_byte_for_byte(
     tmp_path, env, client_here, command, capsys,

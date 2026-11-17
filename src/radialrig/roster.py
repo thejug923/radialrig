@@ -719,9 +719,10 @@ def mismatch_clause(state: ProjectState) -> str:
     return UNKNOWN_CLIENT_CLAUSE.format(file=Path(state.root) / cn.CONNECT_REL)
 
 
-def _facts(state: ProjectState) -> str:
+def _facts(state: ProjectState, trust=None) -> str:
     """One row's three facets, in the order the report reads them: the
-    command line's words for `project_facts`."""
+    command line's words for `project_facts`. With `trust` (the function
+    `codex_trust` returns), a fourth says whether Codex trusts it."""
     said = project_facts(state)
     if said.mismatch:
         connected = said.mismatch
@@ -729,11 +730,102 @@ def _facts(state: ProjectState) -> str:
         connected = f"not registered with {cn.label_phrase()}"
     else:
         connected = f"registered with {said.client.label}"
-    return "; ".join((
+    facets = [
         "mounted" if said.mounted else "not mounted",
         connected,
         "; ".join(_skills_facet(label, names) for label, names in said.skills),
-    ))
+    ]
+    if trust is not None:
+        facets.append(trust(state.root))
+    return "; ".join(facets)
+
+
+# Whether Codex trusts a project, as the command line's row says it
+# (PLAN-0026 phase 5). Codex loads a project's own servers only where it
+# trusts the folder, so the untrusted row says what that costs. A
+# settings file that is missing or will not parse reads unknown, never
+# trusted.
+CODEX_TRUSTED = "trusted by Codex"
+CODEX_UNTRUSTED = "not trusted by Codex, which loads no RadialRig tools here"
+CODEX_UNKNOWN = "Codex trust unknown: no readable Codex settings"
+
+
+def _trust_key(path: str) -> str:
+    # Codex writes a Windows key lowercased with backslashes; `normcase`
+    # folds a roster root the same way there and leaves it as is on Linux.
+    return os.path.normcase(os.path.normpath(path))
+
+
+def _main_repository(marker: Path) -> Path | None:
+    """The main repository's root for a linked worktree's `.git` file, or
+    None. The file's `gitdir:` line names the worktree's admin folder, and
+    that folder's `commondir` names the main repository's `.git`."""
+    try:
+        first = marker.read_text(encoding="utf-8").splitlines()[0]
+        if not first.startswith("gitdir:"):
+            return None
+        admin = marker.parent / first[len("gitdir:"):].strip()
+        common = admin / (admin / "commondir").read_text(encoding="utf-8").strip()
+    except (OSError, ValueError, IndexError):
+        return None
+    common = Path(os.path.normpath(common))
+    return common.parent if common.name == ".git" else None
+
+
+def _trust_folders(root: str) -> list[str]:
+    """The folders Codex looks up a project's trust under, in its order:
+    the root itself, the nearest folder at or above it holding `.git`, and
+    a linked worktree's main repository. Read from the file system alone,
+    as Codex reads it, without running git. A `.git` folder counts only
+    when it holds HEAD; a `.git` file is a worktree's."""
+    folders = [root]
+    here = Path(root)
+    try:
+        for folder in (here, *here.parents):
+            marker = folder / ".git"
+            if marker.is_file():
+                folders.append(str(folder))
+                main = _main_repository(marker)
+                if main is not None:
+                    folders.append(str(main))
+                break
+            if (marker / "HEAD").exists():
+                folders.append(str(folder))
+                break
+    except OSError:
+        pass
+    return folders
+
+
+def codex_trust(*, env=None):
+    """How Codex's own settings answer for each project root: a function
+    from root to the row's facet. Reads the file once and writes nothing.
+
+    The file is `config.toml` under `CODEX_HOME`, or under `~/.codex`
+    where that is unset, which is where Codex itself looks. Trust is the
+    `trust_level` of the first `[projects.'<folder>']` table Codex would
+    find for the root, trying the folders `_trust_folders` names in turn;
+    a root none of them has an entry for is not trusted.
+    """
+    env = os.environ if env is None else env
+    home = env.get("CODEX_HOME") or str(Path.home() / ".codex")
+    try:
+        data = mnt._load_toml((Path(home) / "config.toml").read_bytes())
+        tables = data.get("projects", {})
+        levels = {_trust_key(key): table["trust_level"]
+                  for key, table in tables.items()
+                  if isinstance(table, dict) and "trust_level" in table}
+    except (OSError, ValueError, AttributeError):
+        return lambda root: CODEX_UNKNOWN
+
+    def facet(root: str) -> str:
+        for folder in _trust_folders(root):
+            level = levels.get(_trust_key(folder))
+            if level is not None:
+                return CODEX_TRUSTED if level == "trusted" else CODEX_UNTRUSTED
+        return CODEX_UNTRUSTED
+
+    return facet
 
 
 def orphan_command(orphan: Orphan) -> str:
@@ -741,14 +833,16 @@ def orphan_command(orphan: Orphan) -> str:
     return f"radialrig unconnect {orphan.client} --orphan {orphan.key}"
 
 
-def report_rows(states, found) -> tuple[mnt.Disposition, ...]:
+def report_rows(states, found, trust=None) -> tuple[mnt.Disposition, ...]:
     """Every row of the projects report, built here rather than in report.
 
     A row is a `mount.Disposition` like every other row both surfaces
     render, so the column renderer needs nothing new. A mismatch row
     carries all three facets, not the mismatch alone, so the printed
     report and the machine-readable line say the same thing about the
-    same project.
+    same project. The command line passes `trust` (PLAN-0026 phase 5)
+    so its project rows also say whether Codex trusts each one; the
+    manage page passes none and its rows read as before.
     """
     rows: list[mnt.Disposition] = []
     for state in states:
@@ -757,12 +851,12 @@ def report_rows(states, found) -> tuple[mnt.Disposition, ...]:
         elif state.connected == CONNECTED_MISMATCH:
             rows.append(mnt.Disposition(
                 state.root, mnt.LEFT, ROSTER_MISMATCH,
-                _facts(state),
+                _facts(state, trust),
             ))
         else:
             rows.append(mnt.Disposition(
                 state.root, mnt.CURRENT, ROSTER_LISTED,
-                _facts(state),
+                _facts(state, trust),
             ))
     for orphan in found:
         if orphan.root:

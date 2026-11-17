@@ -71,11 +71,12 @@ NonEmpty = Annotated[str, Field(min_length=1)]
 # The schema carries no length bound on purpose: an empty or overlong
 # sentence is a change that does not yet pass, so it comes back as
 # `rejected` with the fix named, not as a validation error (SPEC-3
-# section 7). The 300-character limit is the plan's (PLAN-0012 phase 2).
+# section 7). The 300-character limit is the plan's (PLAN-0012 phase 2);
+# the description states it (SPEC-3 section 1 guarantee 6, PLAN-0026).
 SUMMARY_MAX = 300
 Summary = Annotated[str, Field(description=(
-    "One plain sentence saying what the ruling now says; the person "
-    "approves it."
+    f"One plain sentence, at most {SUMMARY_MAX} characters, saying what the "
+    "ruling now says; the person approves it."
 ))]
 
 ROOT = resolve_root()
@@ -275,17 +276,100 @@ def _dependents(rid: str) -> set[str]:
     return out
 
 
-def _missing_propagation(rid: str, rel: str, entries: list[dict] | None) -> str | None:
-    """The complaint when the caller left a dependent out of an 8.5 pass."""
-    missing = sorted(_dependents(rid) - {rel} - {e.get("path", "") for e in entries or []})
+def _missing_propagation(
+    rid: str, rel: str, entries: list[dict] | None, unchanged: list[str] | None,
+) -> str | None:
+    """The complaint when the caller left a dependent out of an 8.5 pass.
+
+    A dependent is covered when either list names it: `propagate` with its
+    text, or `unchanged` by path alone (SPEC-3 section 4.3).
+    """
+    covered = {e.get("path", "") for e in entries or []} | set(unchanged or [])
+    missing = sorted(_dependents(rid) - {rel} - covered)
     if not missing:
         return None
     return (
         f"propagation is incomplete. Changing '{rid}' requires reading "
         f"{', '.join(missing)}, which the call does not touch. SPEC-1 8.5 "
         "reads the whole depends-on chain and stamps last-verified on every "
-        "record read, whether or not its text changed."
+        "record read, whether or not its text changed. Send each in propagate "
+        "with its text, or name it in unchanged if you read it and left it "
+        "as it is."
     )
+
+
+def _stamp_line(text: str, day: str) -> str | None:
+    """`text` with its frontmatter `last-verified` line set to `day`.
+
+    Every other character stays, line endings included: the file is read
+    and spliced as it stands, never rebuilt from a normalized copy
+    (BUG-0011). None when the frontmatter holds no such line, since the
+    verb adds no field (SPEC-3 section 4.3).
+    """
+    lines = text.splitlines(keepends=True)
+    if not lines or lines[0].strip() != "---":
+        return None
+    for i, line in enumerate(lines[1:], start=1):
+        if line.strip() == "---":
+            return None
+        if line.startswith("last-verified:"):
+            content = line.splitlines()[0]
+            lines[i] = f"last-verified: {day}{line[len(content):]}"
+            return "".join(lines)
+    return None
+
+
+def _unchanged_ops(
+    rid: str, rel: str, unchanged: list[str] | None, entries: list[dict] | None,
+) -> tuple[list[txn.Write], str | None]:
+    """Stamps for the dependents the caller read and left as they are.
+
+    SPEC-3 section 4.3, from D-18 constraint 5: the caller names each by
+    path alone, and the verb writes the one mark 8.5 asks for, the review
+    date on its `last-verified` line. A file already dated today carries
+    that mark and is not written. A path outside the chain, or one
+    `propagate` also carries, is refused by name, as is a file with no
+    `last-verified` line.
+    """
+    if not unchanged:
+        return [], None
+    chain = _dependents(rid) - {rel}
+    carried = {e.get("path", "") for e in entries or []}
+    day = _today().isoformat()
+    ops: list[txn.Write] = []
+    for path in dict.fromkeys(unchanged):
+        if path not in chain:
+            return [], (
+                f"unchanged path '{path}' is not in the depends-on chain of "
+                f"'{rid}', so this review does not read it. Name only records "
+                f"that depend on '{rid}', directly or through another record."
+            )
+        if path in carried:
+            return [], (
+                f"'{path}' is in both propagate and unchanged. Send it in "
+                "propagate when its text changed, or name it in unchanged when "
+                "it did not, never both."
+            )
+        try:
+            # Bytes, not read_text: the stamp keeps the file's own line
+            # endings, which universal newlines would fold.
+            raw = (ROOT / path).read_bytes().decode("utf-8")
+        except UnicodeDecodeError:
+            return [], (
+                f"unchanged path '{path}' {NOT_UTF8}, so its last-verified "
+                "line cannot be read; check_docs names it"
+            )
+        if (parse_frontmatter(raw)[0] or {}).get("last-verified") == day:
+            continue
+        stamped = _stamp_line(raw, day)
+        if stamped is None:
+            return [], (
+                f"'{path}' has no last-verified line in its frontmatter, and "
+                "the verb adds no field (SPEC-3 section 4.3). Send it in "
+                "propagate with the line in its text."
+            )
+        ops.append(txn.Write(path, stamped))
+    return ops, None
 
 
 def _propagation_ops(entries: list[dict] | None) -> tuple[list[txn.Write], str | None]:
@@ -347,6 +431,27 @@ def _propagation_ops(entries: list[dict] | None) -> tuple[list[txn.Write], str |
             )
         ops.append(txn.Write(rel, text))
     return ops, None
+
+
+def _dependent_ops(
+    rid: str, rel: str, entries: list[dict] | None, unchanged: list[str] | None,
+) -> tuple[list[txn.Write], str | None]:
+    """Every write an 8.5 pass makes, or the first complaint that stops it.
+
+    Both verbs that change a position walk the same chain the same way:
+    every dependent in one of the two lists, each propagate entry changing
+    wording only, and each unchanged path stamped (SPEC-3 section 4.3).
+    """
+    complaint = _missing_propagation(rid, rel, entries, unchanged)
+    if complaint:
+        return [], complaint
+    texts, complaint = _propagation_ops(entries)
+    if complaint:
+        return [], complaint
+    stamps, complaint = _unchanged_ops(rid, rel, unchanged, entries)
+    if complaint:
+        return [], complaint
+    return [*texts, *stamps], None
 
 
 # --- Ids other branches hold (SPEC-3 section 6) -------------------------
@@ -544,13 +649,17 @@ def amend_ruling(
     summary: Summary,
     archive: dict | None = None,
     propagate: list[dict] | None = None,
+    unchanged: list[NonEmpty] | None = None,
 ) -> dict:
     """Rewrite an in-force record, keeping its id.
 
     mode='position': the ruling changes (SPEC-1 8.1). Needs archive
     {path, text}; the verb sets that entry's last-verified itself.
     mode='metadata': a re-check (8.6). Only last-verified may differ.
+    Position mode covers every dependent in one of two lists:
     propagate: [{path, text}] dependents; wording only.
+    unchanged: [path] dependents read and left as they are; the verb
+    sets each one's last-verified to today.
     """
     record = _live_record(id)
     if record is None:
@@ -563,9 +672,10 @@ def amend_ruling(
 
     current = record.path.read_text(encoding="utf-8")
     if mode == "metadata":
-        if archive or propagate:
+        if archive or propagate or unchanged:
             return _error(
-                "metadata mode archives nothing and propagates nothing (8.6)"
+                "metadata mode archives nothing, propagates nothing and stamps "
+                "no dependent (8.6)"
             )
         was, now = current.splitlines(), text.splitlines()
         differing = [(a, b) for a, b in zip(was, now, strict=False) if a != b]
@@ -597,10 +707,7 @@ def amend_ruling(
     entry = _set_field(
         archive["text"], "last-verified", (prior_fm or {}).get("last-verified", ""),
     )
-    complaint = _missing_propagation(id, record.rel, propagate)
-    if complaint:
-        return _error(complaint)
-    extra, complaint = _propagation_ops(propagate)
+    extra, complaint = _dependent_ops(id, record.rel, propagate, unchanged)
     if complaint:
         return _error(complaint)
     ops = [txn.Write(record.rel, text), txn.Write(archive["path"], entry), *extra]
@@ -613,12 +720,14 @@ def retire_ruling(
     summary: Summary,
     successor: dict | None = None,
     propagate: list[dict] | None = None,
+    unchanged: list[NonEmpty] | None = None,
 ) -> dict:
     """Move a record to docs/archive/, past tense (SPEC-1 8.2, 8.3).
 
     successor {path, text}: the new record taking the question (8.3),
     under an id no file holds on any branch. Both files land together or
-    neither does.
+    neither does. propagate, unchanged: its dependents, as amend_ruling
+    takes them.
     """
     record = _live_record(id)
     if record is None:
@@ -658,10 +767,7 @@ def retire_ruling(
         if taken:
             return _error(taken)
         ops.append(txn.Write(successor["path"], successor["text"]))
-    complaint = _missing_propagation(id, record.rel, propagate)
-    if complaint:
-        return _error(complaint)
-    extra, complaint = _propagation_ops(propagate)
+    extra, complaint = _dependent_ops(id, record.rel, propagate, unchanged)
     if complaint:
         return _error(complaint)
     return _land(summary, [*ops, *extra])
@@ -674,13 +780,25 @@ VERBS = (propose_record, amend_ruling, retire_ruling)
 TARGETS = {"propose_record": "path", "amend_ruling": "id", "retire_ruling": "id"}
 
 
+# What a client hands its agent at session start (PLAN-0026 phase 5). It
+# restates the route map's rule 7 and adds nothing to it.
+INSTRUCTIONS = (
+    "Change a governed record through propose_record, amend_ruling or "
+    "retire_ruling; a direct edit under SPEC-1 section 8 is the fallback. "
+    "Every verb stops at the working tree and touches no git, and each "
+    "returns the ruling as one plain sentence: show it to the person, read "
+    "the diff, and commit nothing until the person says yes."
+)
+
+
 def build_server():
     from mcp.server import MCPServer
     from mcp.types import ToolAnnotations
 
     # The version a client reads in `serverInfo` is the installed engine's,
     # from the one function every surface reads (PLAN-0018 phase 1).
-    mcp = MCPServer("radialrig-write", version=installed_version())
+    mcp = MCPServer("radialrig-write", version=installed_version(),
+                    instructions=INSTRUCTIONS)
     # Not read-only, and not destructive: no verb deletes a record and the
     # working tree is where every write stops (D-18 constraints 1 and 4).
     writes = ToolAnnotations(

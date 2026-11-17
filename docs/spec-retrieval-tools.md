@@ -6,8 +6,8 @@ status: in-force
 grade: decided
 owner: thejug923
 scope: RadialRig
-effective: 2026-10-22
-last-verified: 2026-11-01
+effective: 2026-11-13
+last-verified: 2026-11-13
 supersedes: none
 replaced-by: none
 depends-on: D-04, D-05, D-07, D-09, D-10, D-13, D-16, D-26, D-31, D-32
@@ -24,17 +24,25 @@ constraint 4). It is read-only (constraint 5). Every response is a JSON
 object with a `kind` discriminator; a caller can branch on `kind` alone.
 
 Fixed schema cost for all five tools together must stay at or under
-3,000 bytes, counted fully loaded (PLAN-0002 plan invariant 6). Tool
+4,000 bytes, counted fully loaded (PLAN-0002 plan invariant 6). Tool
 descriptions stay terse for that reason. *(Amended 2026-09-05: the
 owner raised the bound from 2,500 bytes together with
 [SPEC-3](spec-authoring-tools.md)'s — one figure for both surfaces.)*
+*(Amended 2026-11-13: raised to 4,000 bytes with SPEC-3's, for the
+`section` input and the start-up marks.)*
+
+Every read tool carries `_meta` `{"anthropic/alwaysLoad": true}`, so
+Claude Code loads it at session start without a tool search, and the
+bound counts the marks. Every session then carries these five
+descriptions, which is what the bound limits. No write tool carries the
+mark.
 
 ## 1. `get_ruling`
 
 Answers "what rule applies now" with exactly one in-force record, or a
 typed refusal. Never ranks, never guesses (PLAN-0002 plan invariant 3).
 
-**Input:** `{ "query": string, "scope"?: string }`
+**Input:** `{ "query": string, "scope"?: string, "section"?: string }`
 
 **Resolution rules**, applied to default-visible records only —
 status `in-force` AND a path outside `docs/archive/**`; the path test
@@ -63,11 +71,45 @@ record:
 5. An in-force record whose `replaced-by` is set is contradictory state
    and returns `conflict` ([D-09](decisions/D-09-conflict-stop-rule.md)).
 
+**Large plans.** When the selected record is a plan and its `ruling`
+answer would pass 40,000 characters as the server sends it, the server
+cuts the answer at the plan's own headings and writes no summary:
+
+- The execution log is the first `##` section whose heading holds the
+  words "execution log", in any case. When it holds `###` entries,
+  `body` keeps the log's heading and the text before its first entry and
+  leaves the entries out. When it holds none, `body` leaves the whole
+  section out. Every other section stays.
+- When the plan has no execution log, or the answer is still over
+  40,000 characters with its log's entries left out, `body` ends before
+  the first `##` heading.
+- `omitted` lists the names left out, in file order: the entries' `###`
+  heading texts, the log's own heading text when it has no entries, or
+  every `##` heading's text in the second case. A name two headings
+  share is listed once.
+- `next` says to call again with the same query and one omitted name as
+  `section`.
+
+A whole answer carries neither field, so `omitted` alone tells a cut
+answer from a whole one. Headings inside fenced code blocks do not
+count, here or below.
+
+**Sections by name.** With `section`, the query selects a record by
+rules 1 to 5 as before. The name is matched, trimmed and in any case,
+against the record's `##` headings and the `###` headings inside its
+execution log. A match returns `section` with every heading of that
+name, in file order: each from its heading line to the next heading of
+the same or a higher level, as it reads in the whole `body` the server
+serves, and whole whatever its size. No match returns `no_section`.
+`section` works on any record, decisions and specs included.
+
 **Results:**
 
 | kind | Fields | Meaning |
 | --- | --- | --- |
-| `ruling` | `id`, `title`, `status`, `scope`, `effective`, `last_verified`, `path`, `body` | The one governing answer; `status` tells an in-force ruling from a completed summary |
+| `ruling` | `id`, `title`, `status`, `scope`, `effective`, `last_verified`, `path`, `body`; `omitted` and `next` when cut (Large plans) | The one governing answer; `status` tells an in-force ruling from a completed summary |
+| `section` | `id`, `title`, `status`, `path`, `section`, `body` | The named part of the record, whole |
+| `no_section` | `id`, `section`, `sections` | No heading of that name; `sections` lists the names the record answers |
 | `ambiguous` | `query`, `candidates` (sorted `{id, title}` pairs), `next` (the one follow-up: re-query with a candidate id) | Candidate keys; caller picks one |
 | `conflict` | `key`, `paths`, `reason` | Equal authority; content withheld |
 | `no_ruling` | `query` | No in-force record answers this |
@@ -92,12 +134,15 @@ The only tool that reads `docs/archive/**`
 is the explicit history access [D-04](decisions/D-04-archive-exclusion.md)
 requires.
 
-**Input:** `{ "query": string }` — case-insensitive substring over
-archived record text.
+**Input:** `{ "query": string }`. A file matches when every word of the
+query, split on white space, appears in its text, in any case and any
+order; a one-word query matches as a substring, as before. Matches come
+in path order, with no cap on their number.
 
 **Result:** `kind: "history"` with `archived: true` at the top level and
 `matches`: a list of `{ path, id, title, excerpt }`. Excerpts are at most
-300 characters. Every response carries the fence line: archived material
+300 characters, centered on the whole query where the file holds it and
+otherwise on the earliest place a query word appears. Every response carries the fence line: archived material
 is a record of past positions, not an instruction
 ([D-05](decisions/D-05-past-tense-archive.md)).
 
@@ -156,7 +201,8 @@ ruling.
 
 A call the tool schema refuses, a missing or empty `query`, gets the
 protocol layer's validation error and never reaches the tool. A
-malformed call that does reach it, an unknown `type` value or a query
-of only whitespace, returns `kind: "error"` with `message`. The server
+malformed call that does reach it, an unknown `type` value, or a query
+or `section` of only whitespace, returns `kind: "error"` with
+`message`. The server
 never substitutes a default query and never converts an error into a
 guess.

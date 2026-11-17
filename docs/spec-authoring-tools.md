@@ -6,8 +6,8 @@ status: in-force
 grade: decided
 owner: thejug923
 scope: RadialRig
-effective: 2026-11-01
-last-verified: 2026-11-01
+effective: 2026-11-13
+last-verified: 2026-11-13
 supersedes: none
 replaced-by: none
 depends-on: D-06, D-09, D-18, D-19, D-21, D-22, D-23, D-35
@@ -25,12 +25,14 @@ share `src/radialrig/doc_core.py` (constraint 7).
 
 Every response is a JSON object with a `kind` discriminator, as SPEC-2
 does. Fixed schema cost for all three verbs together stays at or under
-3,000 bytes, counted fully loaded (PLAN-0003 invariant 7) — the same
+4,000 bytes, counted fully loaded (PLAN-0003 invariant 7) — the same
 bound [SPEC-2](spec-retrieval-tools.md) sets for the five read tools.
 *(Amended 2026-09-05: the owner raised the bound from 2,500 bytes when
 the required `summary` input put the three verbs at 2,720 — smarter
 models read larger documents fine, and the ~55 extra tokens each
-session carries are acceptable.)*
+session carries are acceptable.)* *(Amended 2026-11-13: the owner
+raised it to 4,000 bytes when the `unchanged` input and the summary
+limit went into the descriptions.)*
 
 Every verb declares `readOnlyHint: false` in its tool annotations, and
 every read tool declares `readOnlyHint: true`. A client tells the two
@@ -44,8 +46,9 @@ what it adds.
 1. **The caller writes the text.** Every verb takes whole file text and
    validates it. No verb authors, rewrites, reformats or repairs a body,
    and no verb fills in a field the caller left wrong (D-18 constraint
-   5). The one exception is the archive entry's `last-verified`, in
-   section 4.
+   5). Two values are the verb's to write: the archive entry's
+   `last-verified` (section 4.1), and the `last-verified` of a dependent
+   the caller names as read and unchanged (section 4.3).
 2. **Validate on a copy, then write.** The verb materializes the proposed
    file set on a temporary copy of the corpus and runs C1–C7 against the
    result. The working tree is touched only after the gate passes
@@ -62,7 +65,9 @@ what it adds.
    ([D-06](decisions/D-06-stable-identifiers.md), constraint 1).
 6. **Every verb takes a required `summary`** — one plain sentence saying
    what the ruling now says, at most 300 characters once surrounding
-   whitespace is trimmed. The caller writes it (guarantee 1). An empty
+   whitespace is trimmed. The tool's description states the limit, and
+   the schema sets no length bound on it. The caller writes it
+   (guarantee 1). An empty
    or overlong summary comes back `rejected` with a reason naming the
    fix, and nothing is written. The `applied` result echoes the
    sentence, and the agent shows it to the person for approval before
@@ -114,7 +119,8 @@ required and never inferred** (D-18 constraint 1).
   "text": string,                       // whole file, rewritten
   "summary": string,                    // one plain sentence (section 1)
   "archive": { "path": string, "text": string },   // position mode only
-  "propagate"?: [ { "path": string, "text": string } ] }
+  "propagate"?: [ { "path": string, "text": string } ],
+  "unchanged"?: [ string ] }              // dependents read, left as they are (4.3)
 ```
 
 ### 4.1 `position` — the ruling changes (SPEC-1 8.1)
@@ -139,7 +145,8 @@ paragraph and its `replaced-by` pointer, C2 for the required fields.
 
 ### 4.2 `metadata` — a re-check, no position change (SPEC-1 8.6)
 
-Archives nothing and propagates nothing. **`last-verified` is the only
+Archives nothing and propagates nothing, so it takes neither
+`propagate` nor `unchanged`. **`last-verified` is the only
 field that may differ from the record on disk.** The verb rejects a call
 whose body text differs by one character, and rejects a change to any
 other frontmatter field — `grade` included, because a re-check records
@@ -152,15 +159,24 @@ archives nothing cannot carry a body change through it.
 
 ### 4.3 Propagation (SPEC-1 8.5)
 
-`propagate` carries the dependents read down the `depends-on` chain. Each
-entry bumps that record's `last-verified`, whether or not its text
-changed, so the review leaves a mark.
+Every dependent read down the `depends-on` chain bumps its
+`last-verified`, whether or not its text changed, so the review leaves a
+mark. `propagate` carries a dependent whose text the caller sends, the
+new date in it. `unchanged` names, by path alone, a dependent the caller
+read and left as it is, and the verb writes the mark itself: it sets
+that file's `last-verified` line to the review date and changes no other
+line. A file already dated today is left alone and not written. A file
+with no `last-verified` line is refused, because the verb adds no field.
+Listing a path says the caller read it. A dependent listed without
+being read gets a date nobody earned.
 
 **The verb identifies the chain; the caller does not declare it.** It
 walks `depends-on` from the changed record, direct and transitive, and
-**rejects a call that leaves any dependent untouched**, naming the ones
-missed. A caller who propagates to two of three dependents gets an
-`error` naming the third, and nothing is written. `metadata` mode
+**rejects a call that leaves any dependent out of both lists**, naming
+the ones missed. A caller who covers two of three dependents gets an
+`error` naming the third, and nothing is written. A path in `unchanged`
+that is outside the chain, or that `propagate` also carries, gets an
+`error` naming it, and nothing is written. `metadata` mode
 changes no position, so nothing propagates and the chain is not
 walked.
 
@@ -187,7 +203,8 @@ enforces the fence line and the placement, and nothing enforces the tense
   "text": string,                       // whole file, past tense, status archived
   "summary": string,                    // one plain sentence (section 1)
   "successor"?: { "path": string, "text": string },
-  "propagate"?: [ { "path": string, "text": string } ] }
+  "propagate"?: [ { "path": string, "text": string } ],
+  "unchanged"?: [ string ] }              // as in section 4.3
 ```
 
 **Without `successor`** the record is retired and nothing replaces it
@@ -254,8 +271,10 @@ the `reason` naming the fix (section 1, guarantee 6).
 `error` covers every refusal the verb makes before the gate runs, such
 as an `id` no record holds or one the text changes or reuses, a path
 already taken or outside the governed layout, a `metadata` call that
-changes more than `last-verified`, or a propagation that is
-incomplete, unstamped or changes what a dependent rules. A call the
+changes more than `last-verified`, a propagation that is incomplete,
+unstamped or changes what a dependent rules, or an `unchanged` path
+outside the chain, carried by `propagate` too, or holding no
+`last-verified` line. A call the
 tool schema refuses, a missing field, an empty `id`, `path` or
 `text`, or a `mode` other than the two, gets the protocol layer's
 validation error and never reaches the verb. The server never

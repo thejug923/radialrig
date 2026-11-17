@@ -10,6 +10,7 @@ ruling -> abstention, archive reachable only via search_history.
 from __future__ import annotations
 
 import datetime as dt
+import re
 import subprocess
 from pathlib import Path
 
@@ -220,18 +221,173 @@ def test_zombie_archive_record_invisible_to_default_tools(root):
     assert len(rs.search_history("dead content")["matches"]) == 1
 
 
+# --- large plans and sections by name (SPEC-2 s1, PLAN-0026 phase 4) ---
+
+def served(tool: str, **args) -> tuple[dict, int]:
+    """A tool's answer as a client receives it, and its length as sent."""
+    import asyncio
+    import json
+
+    result = asyncio.run(rs.build_server().call_tool(tool, args))
+    text = result.content[0].text
+    return json.loads(text), len(text)
+
+
+def plan_text(rid: str, title: str, body: str) -> str:
+    return record_text(rid, title, body=body).replace("type: decision", "type: plan")
+
+
+def whole(body: str) -> str:
+    """The `body` the server serves for a fixture record whole."""
+    return f"\n**Status: in-force.**\n\n{body}"
+
+
+FILLER = "Run notes. " * 2000  # 22,000 characters on one line
+
+
+BIG_PLAN = (
+    "# PLAN-0090: Big plan\n\n"
+    "## Objective\n\nShip it.\n\n"
+    "## Phase 1: Build\n\n```text\n### Not a heading\n## Nor this\n```\n\n"
+    "## Execution log\n\nPhases append here.\n\n"
+    "### First run\n\n" + FILLER + "\n\n"
+    "### Rerun\n\nThe first rerun.\n\n"
+    "### Second run\n\n" + FILLER + "\n\n"
+    "### Rerun\n\nThe second rerun.\n\n"
+    "## History\n\n- An older version."
+)
+
+
+def test_a_large_plan_leaves_out_its_log_entries_and_lists_them(root):
+    write(root, "docs/plans/PLAN-0090-big.md", plan_text("PLAN-0090", "Big plan", BIG_PLAN))
+    full = whole(BIG_PLAN)
+    out, sent = served("get_ruling", query="PLAN-0090")
+    assert out["kind"] == "ruling"
+    assert out["body"] == full[:full.index("### First run")] + full[full.index("## History"):]
+    assert out["omitted"] == ["First run", "Rerun", "Second run"]
+    assert "section" in out["next"]
+    assert sent <= 40_000 < len(full)
+    assert served("get_ruling", query="big plan")[0] == out
+    assert served("get_ruling", query="PLAN-0090", section="First run")[0]["body"] == (
+        "### First run\n\n" + FILLER + "\n\n"
+    )
+    rerun, _ = served("get_ruling", query="PLAN-0090", section=" rerun ")
+    assert rerun == {
+        "kind": "section", "id": "PLAN-0090", "title": "Big plan",
+        "status": "in-force", "path": "docs/plans/PLAN-0090-big.md", "section": "rerun",
+        "body": "### Rerun\n\nThe first rerun.\n\n### Rerun\n\nThe second rerun.\n\n",
+    }
+    # A heading inside a fence is text, not a heading.
+    assert served("get_ruling", query="PLAN-0090", section="Phase 1: Build")[0]["body"] == (
+        "## Phase 1: Build\n\n```text\n### Not a heading\n## Nor this\n```\n\n"
+    )
+    assert served("get_ruling", query="PLAN-0090", section="Not a heading")[0]["kind"] == "no_section"
+
+
+def test_a_log_of_plain_paragraphs_is_left_out_whole(root):
+    body = (
+        "# PLAN-0091: Paragraph log\n\n## Objective\n\nShip it.\n\n"
+        "## Review, repair and execution log\n\n" + FILLER + "\n\n" + FILLER + "\n\n"
+        "## History\n\n- An older version."
+    )
+    write(root, "docs/plans/PLAN-0091-paras.md", plan_text("PLAN-0091", "Paragraph log", body))
+    full = whole(body)
+    out, sent = served("get_ruling", query="PLAN-0091")
+    start, end = full.index("## Review"), full.index("## History")
+    assert out["body"] == full[:start] + full[end:]
+    assert out["omitted"] == ["Review, repair and execution log"]
+    assert sent <= 40_000
+    log, _ = served("get_ruling", query="PLAN-0091", section="review, repair and execution log")
+    assert log["body"] == full[start:end]
+
+
+@pytest.mark.parametrize("body, names", [
+    (
+        "# PLAN-0092: No log\n\n## Objective\n\nShip it.\n\n"
+        "## Phase 1\n\n" + FILLER + "\n\n" + FILLER + "\n\n## Phase 2\n\nMore.",
+        ["Objective", "Phase 1", "Phase 2"],
+    ),
+    (
+        "# PLAN-0092: Long phase\n\n## Objective\n\nShip it.\n\n"
+        "## Phase 1\n\n" + FILLER + "\n\n" + FILLER + "\n\n"
+        "## Execution log\n\nIntro.\n\n### Run\n\nShort.",
+        ["Objective", "Phase 1", "Execution log"],
+    ),
+], ids=["no-log", "still-too-large"])
+def test_a_plan_still_too_large_ends_before_its_first_section(root, body, names):
+    write(root, "docs/plans/PLAN-0092-cut.md", plan_text("PLAN-0092", "Cut plan", body))
+    full = whole(body)
+    out, sent = served("get_ruling", query="PLAN-0092")
+    assert out["body"] == full[:full.index("## Objective")]
+    assert out["omitted"] == names
+    assert sent <= 40_000
+    assert served("get_ruling", query="PLAN-0092", section="Phase 1")[0]["kind"] == "section"
+
+
+def test_a_plan_under_the_limit_comes_back_whole(root):
+    # The limit counts characters as the server sends them. Python's
+    # json.dumps would count each dash as six and cut this plan.
+    body = (
+        "# PLAN-0093: Small plan\n\n## Objective\n\n" + "dash — " * 4500 + "\n\n"
+        "## Execution log\n\n### Run\n\nShort."
+    )
+    write(root, "docs/plans/PLAN-0093-small.md", plan_text("PLAN-0093", "Small plan", body))
+    out, sent = served("get_ruling", query="PLAN-0093")
+    assert sent <= 40_000
+    assert set(out) == {
+        "kind", "id", "title", "status", "scope", "effective", "last_verified", "path", "body",
+    }
+    assert out["body"] == whole(body)
+
+
+def test_a_section_by_name_on_a_decision(root):
+    write(root, "docs/decisions/D-90-test.md", record_text(
+        body="## Ruling\n\nDo X.\n\n## Why\n\nBecause.\n\n### Detail\n\nMore."))
+    out, _ = served("get_ruling", query="D-90", section="ruling")
+    assert out["kind"] == "section"
+    assert out["body"] == "## Ruling\n\nDo X.\n\n"
+    assert served("get_ruling", query="D-90", section="why")[0]["body"] == (
+        "## Why\n\nBecause.\n\n### Detail\n\nMore."
+    )
+    # Outside an execution log a ### heading is not a name.
+    assert served("get_ruling", query="D-90", section="Detail")[0] == {
+        "kind": "no_section", "id": "D-90", "section": "Detail", "sections": ["Ruling", "Why"],
+    }
+    assert served("get_ruling", query="D-90", section="   ")[0]["kind"] == "error"
+    assert served("get_ruling", query="D-90", section="")[0]["kind"] == "error"
+    assert served("get_ruling", query="nothing like it", section="Ruling")[0]["kind"] == "no_ruling"
+
+
+def test_search_history_matches_every_word_in_any_order(root):
+    write(root, "docs/archive/A-1.md", record_text("A-1", status="archived", body="Beta came. Then alpha."))
+    write(root, "docs/archive/A-2.md", record_text("A-2", status="archived", body="Alpha only."))
+    write(root, "docs/archive/A-3.md", record_text("A-3", status="archived", body="An alpha beta pair."))
+    out = rs.search_history("ALPHA beta")
+    assert [m["id"] for m in out["matches"]] == ["A-1", "A-3"]
+    text = (root / "docs/archive/A-1.md").read_text(encoding="utf-8")
+    pos = text.lower().find("beta")
+    assert out["matches"][0]["excerpt"] == text[max(0, pos - 150):][:300]
+
+
+def test_search_history_centers_on_the_whole_phrase_where_the_file_holds_it(root):
+    write(root, "docs/archive/A-1.md", record_text(
+        "A-1", status="archived", body="A rule first. " + "x" * 400 + " Then the dead rule."))
+    text = (root / "docs/archive/A-1.md").read_text(encoding="utf-8")
+    pos = text.lower().find("dead rule")
+    assert rs.search_history("dead rule")["matches"][0]["excerpt"] == text[pos - 150:pos + 150]
+
+
 def test_read_schema_stays_within_budget():
-    # SPEC-2: fixed schema cost for all five tools at or under 2,500
-    # bytes, counted fully loaded. The write server has carried this
-    # test since Phase 3; the read server's bound was unmeasured until
-    # the 2026-08-16 review named it.
+    # SPEC-2: fixed schema cost for all five tools at or under 4,000
+    # bytes, counted fully loaded, the figure SPEC-2 states since
+    # 2026-11-13.
     import asyncio
 
     tools = asyncio.run(rs.build_server().list_tools())
     total = sum(
         len(t.model_dump_json(exclude_none=True, by_alias=True)) for t in tools
     )
-    assert total <= 2500, f"{total} B over the 2,500 B bound"
+    assert total <= 4000, f"{total} B over the 4,000 B bound"
 
 
 def test_resolve_root_honors_env_override(monkeypatch, tmp_path):
@@ -450,9 +606,20 @@ def test_check_docs_reports_seeded_defect(root):
 # --- the handshake (PLAN-0018 phase 1) ---------------------------------
 
 def handshake(server):
-    """The `serverInfo` a client is given by `initialize`, over the SDK's
-    in-memory streams: the block the stdio transport sends, reached the
-    way a client reaches it rather than read off the server object."""
+    """The `serverInfo` a client is given by `initialize`."""
+    return initialize(server).server_info
+
+
+def sentences(text: str) -> list[str]:
+    """The sentences of a plain-text paragraph: each ends at a stop
+    followed by a space or the end."""
+    return re.findall(r"[^.!?]+[.!?](?=\s|$)", text)
+
+
+def initialize(server):
+    """The whole `initialize` answer a client is given, over the SDK's
+    in-memory streams: what the stdio transport sends, reached the way a
+    client reaches it rather than read off the server object."""
     import asyncio
 
     import anyio
@@ -470,9 +637,43 @@ def handshake(server):
                 async with ClientSession(*client_end) as session:
                     result = await session.initialize()
                 tasks.cancel_scope.cancel()
-        return result.server_info
+        return result
 
     return asyncio.run(go())
+
+
+def test_the_handshake_says_when_to_call_the_read_tools():
+    # PLAN-0026 phase 5: two or three sentences, sent at session start,
+    # naming every read tool.
+    said = initialize(rs.build_server()).instructions
+    assert said == rs.INSTRUCTIONS
+    assert 2 <= len(sentences(said)) <= 3, said
+    for tool in rs.READ_TOOLS:
+        assert tool.__name__ in said
+
+
+def test_the_read_instructions_keep_the_route_maps_archive_rule():
+    """PLAN-0026 phase 6 review (O-2): the start-up sentences give rule 2
+    as the route map the mount writes gives it, `explicitly` included, so
+    they state no looser rule (phase 5 prescription 1)."""
+    from radialrig import mount as mnt
+
+    rule = "only when the task explicitly asks about history"
+    seed = mnt._seed_bytes(mnt.SEED_SECTION_SOURCE).decode("utf-8")
+    assert rule in " ".join(seed.split())
+    assert rule in rs.INSTRUCTIONS
+
+
+def test_every_read_tool_asks_to_load_at_session_start():
+    # PLAN-0026 phase 5 and SPEC-2: the mark rides on the wire, on all
+    # five tools.
+    import asyncio
+
+    tools = asyncio.run(rs.build_server().list_tools())
+    assert len(tools) == 5
+    for tool in tools:
+        assert tool.model_dump(by_alias=True)["_meta"] == {
+            "anthropic/alwaysLoad": True}, tool.name
 
 
 def test_the_handshake_names_the_installed_engine():

@@ -10,12 +10,15 @@ Run:  radialrig-read
 
 from __future__ import annotations
 
+import re
 from typing import Annotated
 
+import pydantic_core
 from pydantic import Field
 
 from radialrig import activity_log as al
 from radialrig.doc_core import (
+    _FENCE_RE,
     Ambiguous,
     Conflict,
     NoRuling,
@@ -72,28 +75,121 @@ def _active_records() -> list[Record]:
     return _snapshot_records
 
 
-def get_ruling(query: NonEmpty, scope: str | None = None) -> dict:
+# SPEC-2 s1, Large plans: a plan answer over this many characters, counted
+# as the server sends it, is cut at the plan's own headings.
+PLAN_LIMIT = 40_000
+CUT_NEXT = "Call get_ruling again with the same query and one omitted name as section."
+_HEADING_RE = re.compile(r"^(#{1,3})[ \t]+(.+?)[ \t]*$", re.M)
+
+
+def _sent_length(answer: dict) -> int:
+    # The SDK sends a dict result as this text (mcp's func_metadata), so
+    # the limit counts what a client receives, non-ASCII as one character.
+    return len(pydantic_core.to_json(answer, fallback=str, indent=2).decode())
+
+
+def _parts(body: str) -> tuple[list[tuple[int, str, int, int]], tuple | None]:
+    """The named parts of `body` in file order, each (level, name, start,
+    end) as offsets into it, and the execution log among them. Names are
+    the `##` headings and the `###` headings inside the log; a part runs
+    to the next heading of the same or a higher level. Fenced lines are
+    blanked first, keeping every offset, so a heading in a fence is text."""
+    masked = _FENCE_RE.sub(lambda m: re.sub(r"[^\n]", " ", m.group()), body)
+    found = [(len(m.group(1)), m.group(2), m.start()) for m in _HEADING_RE.finditer(masked)]
+    heads = [
+        (level, name, start,
+         next((s for lv, _, s in found[i + 1:] if lv <= level), len(body)))
+        for i, (level, name, start) in enumerate(found)
+    ]
+    log = next((h for h in heads if h[0] == 2 and "execution log" in h[1].lower()), None)
+    named = [
+        h for h in heads
+        if h[0] == 2 or (h[0] == 3 and log is not None and log[2] < h[2] < log[3])
+    ]
+    return named, log
+
+
+def _unique(names: list[str]) -> list[str]:
+    """Names in order, one per name in any case."""
+    seen: dict[str, str] = {}
+    for name in names:
+        seen.setdefault(name.lower(), name)
+    return list(seen.values())
+
+
+def _ruling_answer(r: Record) -> dict:
+    answer = {
+        "kind": "ruling",
+        "id": r.id,
+        "title": r.title,
+        "status": r.status,
+        "scope": r.scope,
+        "effective": r.fm.get("effective", ""),
+        "last_verified": r.fm.get("last-verified", ""),
+        "path": r.rel,
+        "body": r.body,
+    }
+    if r.fm.get("type") != "plan" or _sent_length(answer) <= PLAN_LIMIT:
+        return answer
+    named, log = _parts(r.body)
+    if not named:
+        # No `##` heading to cut at, and an empty `omitted` would read as
+        # a whole answer: the plan stays whole.
+        return answer
+
+    def cut(body: str, omitted: list[str]) -> dict:
+        return {**answer, "body": body, "omitted": _unique(omitted), "next": CUT_NEXT}
+
+    if log is not None:
+        entries = [h for h in named if h[0] == 3]
+        if entries:
+            short = cut(r.body[:entries[0][2]] + r.body[log[3]:], [h[1] for h in entries])
+        else:
+            short = cut(r.body[:log[2]] + r.body[log[3]:], [log[1]])
+        if _sent_length(short) <= PLAN_LIMIT:
+            return short
+    return cut(r.body[:named[0][2]], [h[1] for h in named if h[0] == 2])
+
+
+def _section_answer(r: Record, section: str) -> dict:
+    named, _ = _parts(r.body)
+    want = section.strip()
+    hits = [h for h in named if h[1].lower() == want.lower()]
+    if not hits:
+        return {
+            "kind": "no_section",
+            "id": r.id,
+            "section": want,
+            "sections": _unique([h[1] for h in named]),
+        }
+    return {
+        "kind": "section",
+        "id": r.id,
+        "title": r.title,
+        "status": r.status,
+        "path": r.rel,
+        "section": want,
+        "body": "".join(r.body[start:end] for _, _, start, end in hits),
+    }
+
+
+def get_ruling(query: NonEmpty, scope: str | None = None, section: str | None = None) -> dict:
     """In-force ruling for the `query` string: a record key like D-04,
     or free-text words. Typed result on ambiguity, conflict, or no
     match; never a ranked guess. An ambiguous result lists candidate
     keys - call again with one candidate id as `query`. An exact key
-    also reaches a completed plan's summary; free text never does."""
+    also reaches a completed plan's summary; free text never does.
+    `section` returns one heading's part whole; a large plan's answer
+    lists the names in `omitted`."""
     if not query.strip():
         return {"kind": "error", "message": "query must be non-empty"}
+    if section is not None and not section.strip():
+        return {"kind": "error", "message": "section must be non-empty"}
     result = select_ruling(_active_records(), query, scope=scope)
     if isinstance(result, Ruling):
-        r = result.record
-        return {
-            "kind": "ruling",
-            "id": r.id,
-            "title": r.title,
-            "status": r.status,
-            "scope": r.scope,
-            "effective": r.fm.get("effective", ""),
-            "last_verified": r.fm.get("last-verified", ""),
-            "path": r.rel,
-            "body": r.body,
-        }
+        if section is not None:
+            return _section_answer(result.record, section)
+        return _ruling_answer(result.record)
     if isinstance(result, Ambiguous):
         return {
             "kind": "ambiguous",
@@ -140,7 +236,11 @@ def search_history(query: NonEmpty) -> dict:
     results are past positions, never authoritative."""
     if not query.strip():
         return {"kind": "error", "message": "query must be non-empty"}
+    # SPEC-2 s3: every word, any case and order. A file that holds the
+    # whole phrase holds every word of it, so nothing found before is lost,
+    # and its excerpt is placed exactly as before.
     q = query.lower()
+    words = q.split()
     matches = []
     archive = ROOT / "docs" / "archive"
     if archive.exists():
@@ -150,9 +250,12 @@ def search_history(query: NonEmpty) -> dict:
                 # Named by check_docs under C2; it holds no text this
                 # can search, and it stops nothing else from answering.
                 continue
-            pos = text.lower().find(q)
-            if pos < 0:
+            low = text.lower()
+            if not all(w in low for w in words):
                 continue
+            pos = low.find(q)
+            if pos < 0:
+                pos = min(low.find(w) for w in words)
             fm, _ = parse_frontmatter(text)
             start = max(0, pos - EXCERPT_CHARS // 2)
             matches.append({
@@ -251,6 +354,25 @@ def get_guidance(topic: str | None = None) -> dict:
 
 READ_TOOLS = (get_ruling, list_rulings, search_history, check_docs, get_guidance)
 
+# What a client hands its agent at session start (PLAN-0026 phase 5). It
+# restates the route map's rules 1, 2 and 6 in their own terms and adds
+# none: the route map rules, this only says when to call.
+INSTRUCTIONS = (
+    "Call get_ruling before acting on any question of what rule applies "
+    "here: it answers from the one in-force record, or says why it cannot, "
+    "and never guesses. "
+    "Use list_rulings for the catalog, check_docs for the mechanical checks, "
+    "get_guidance for the research guidance, and search_history only when "
+    "the task explicitly asks about history. "
+    "Query by record key when you know it, and cite the record's path in "
+    "any answer that relies on it."
+)
+
+# Claude Code loads a tool with this mark at session start, without a
+# tool search (SPEC-2's start-up mark paragraph). Only the read tools
+# carry it; the schema bound counts it.
+START_UP_MARK = {"anthropic/alwaysLoad": True}
+
 
 def build_server():
     from mcp.server import MCPServer
@@ -258,7 +380,8 @@ def build_server():
 
     # The version a client reads in `serverInfo` is the installed engine's,
     # from the one function every surface reads (PLAN-0018 phase 1).
-    mcp = MCPServer("radialrig", version=installed_version())
+    mcp = MCPServer("radialrig", version=installed_version(),
+                    instructions=INSTRUCTIONS)
     # D-13 constraint 5: this server is read-only. Declaring it on the wire
     # is what lets a client tell these five from the three write verbs
     # without reading the source (D-18 constraint 6).
@@ -270,7 +393,8 @@ def build_server():
         # Each call leaves one line in the log (PLAN-0018 phase 2). The
         # wrapper keeps the tool list byte for byte (Verified 11), and
         # the log never sees a call's arguments (Decided 3).
-        mcp.tool(annotations=reads)(al.logged(tool, al.READ_SERVER))
+        mcp.tool(annotations=reads, meta=START_UP_MARK)(
+            al.logged(tool, al.READ_SERVER))
     return mcp
 
 

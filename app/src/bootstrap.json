@@ -12,8 +12,8 @@
       "sha256": "68a509da24b06b4223a1c0175fb5eb5bc79342b76cbeff0cfe51ac3f5b17b6b2"
     }
   },
-  "package_source": "radialrig @ https://github.com/thejug923/radialrig/releases/download/v0.1.24/radialrig-0.1.24-py3-none-any.whl",
-  "package_sha256": "fa4e8c417fedc72f0fb2d44a6bf2d4d5e5ff01eff3daec6af36423d6da59ef10",
+  "package_source": "radialrig @ https://github.com/thejug923/radialrig/releases/download/v0.1.25/radialrig-0.1.25-py3-none-any.whl",
+  "package_sha256": "3dddd7a22472d27a9fee0343d9d76b6a021782a6f90e7acfeb55856743283dd0",
   "python_pin": "3.13",
-  "engine_min_version": "0.1.24"
+  "engine_min_version": "0.1.25"
 }

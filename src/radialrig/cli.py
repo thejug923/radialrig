@@ -595,7 +595,8 @@ def _cmd_projects(args, root: Path) -> int:
         return OK
     found = ro.orphans()
     _emit(report.projects_report(
-        states, found, ro.report_rows(states, found), resolve=ro.reason_text))
+        states, found, ro.report_rows(states, found, ro.codex_trust()),
+        resolve=ro.reason_text))
     return OK
 
 

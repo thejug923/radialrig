@@ -6,8 +6,8 @@ status: in-force
 grade: decided
 owner: thejug923
 scope: RadialRig
-effective: 2026-11-01
-last-verified: 2026-11-01
+effective: 2026-11-13
+last-verified: 2026-11-13
 supersedes: none
 replaced-by: none
 depends-on: D-03, D-05, D-06, D-13, D-35
@@ -46,19 +46,25 @@ must:
    may make are named in SPEC-3 section 1. A person approves the ruling
    and a person commits; an agent reads the diff
    (D-35 commitment 2).
-5. Take the **whole file text from the caller**. The tool validates and
-   rejects; it never authors, rewrites, or repairs a body. Frontmatter,
-   the head-of-file line ([D-03](D-03-head-of-file-status.md)), and the
-   archive voice line ([D-05](D-05-past-tense-archive.md)) are the
-   caller's to get right and the gate's to enforce.
+5. Take the **whole file text from the caller**, except two values the
+   tool writes itself: the archive entry's `last-verified` (constraint
+   9), and the `last-verified` of a dependent the caller read and left
+   unchanged. The caller names such a dependent by path alone, and the
+   tool sets that one line to the review date and changes no other line
+   in the file. Otherwise the tool validates and rejects; it never
+   authors, rewrites, or repairs a body. Frontmatter, the head-of-file
+   line ([D-03](D-03-head-of-file-status.md)), and the archive voice line
+   ([D-05](D-05-past-tense-archive.md)) are the caller's to get right and
+   the gate's to enforce.
 6. Live in a **second MCP server, registered at mount beside the
    retrieval server**, so capture is on from the first session and off
    only when the owner removes the entry
    (D-35 commitment 6; owner ruling
    2026-09-04). The retrieval server stays read-only, so D-13
    constraint 5 binds it unchanged. The write schema stays inside
-   SPEC-3's 3,000-byte bound (raised from 2,500 by owner ruling
-   2026-09-05), which is what every session pays for carrying it.
+   SPEC-3's 4,000-byte bound (raised from 2,500 by owner ruling
+   2026-09-05, and to 4,000 by owner ruling 2026-11-13), which is what
+   every session pays for carrying it.
 7. Share `src/radialrig/doc_core.py` with the validator and the retrieval
    server.
    A third implementation of truth selection is a drift defect
@@ -102,6 +108,16 @@ Constraint 5 is the caller's choice, made 2026-08-15 against the
 recommendation that the tool build the frame. The consequence is stated
 plainly: C2, C3 and C7 stay *validated*, not *guaranteed*, so a caller
 will iterate against the gate. The gate still holds the corpus.
+
+**Constraint 5's second exception came from use.** In the twelve weeks
+to 2026-11-12, 25 of 56 refused `amend_ruling` calls had left a
+dependent out, and every dependent had to come back as whole text even
+when only its date changed: 392,000 characters of them in all. In two
+projects agents edited rule files directly instead, and one agent
+gave the dependents as its reason. Naming an unchanged dependent by path keeps
+the completeness check and drops the copying, and the one line the tool
+writes is the stamp SPEC-1 section 8.5 already asks for
+(`reports/mcp-usage-2026-11/FINDINGS.md`, section 1).
 
 One known risk. A write server pointed at another corpus through
 `RADIALRIG_DOCS_ROOT` writes to that corpus. Until 2026-09-04
