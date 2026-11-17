@@ -41,7 +41,9 @@ from radialrig import retrieval_server as rs
 from radialrig import roster as ro
 from radialrig import setup_web
 from radialrig.tests.test_authoring_server import (  # noqa: F401 - fixtures, by name
+    DEP,
     S,
+    archived_text,
     corpus,
 )
 from radialrig.tests.test_authoring_server import record as write_record
@@ -374,6 +376,10 @@ def test_the_read_server_writes_a_start_event_and_one_line_per_tool_call(
     # Decided 3: no tool argument and no record text, ever.
     assert "D-90" not in line
     assert "The answer." not in log_text()
+    # PLAN-0026: the section input is an argument too, and stays out.
+    asyncio.run(rs.build_server().call_tool(
+        "get_ruling", {"query": "D-90", "section": "Unlogged name"}))
+    assert "Unlogged name" not in log_text()
     # Invariant 2: nothing but protocol on stdout.
     assert capsys.readouterr().out == ""
 
@@ -405,6 +411,19 @@ def test_the_write_server_logs_each_verbs_target_and_nothing_else(corpus, capsys
     assert capsys.readouterr().out == ""
 
 
+def test_the_write_server_logs_no_path_the_unchanged_list_names(corpus, capsys):
+    """PLAN-0026 phase 3 adds an input, and the log still holds the verb's
+    target alone: never a dependent the caller names (PLAN-0018)."""
+    asyncio.run(a.build_server().call_tool("retire_ruling", {
+        "id": "D-90", "text": archived_text("D-90"), "summary": S, "unchanged": [DEP],
+    }))
+    line = events_now()[-1]
+    assert what(line) == "retire_ruling D-90"
+    assert re.search(r"  kind applied, \d+ ms$", line), line
+    assert "D-91" not in log_text()
+    assert capsys.readouterr().out == ""
+
+
 def test_the_write_server_writes_a_start_event(monkeypatch, capsys):
     """The same start event the read server writes, under this server's
     name: its version, the folder it pinned and its process id, one
@@ -430,10 +449,10 @@ def test_the_wrapper_leaves_both_tool_lists_byte_for_byte():
     from mcp.server import MCPServer
     from mcp.types import ToolAnnotations
 
-    def bare(name, tools, **hints):
+    def bare(name, tools, meta=None, **hints):
         server = MCPServer(name)
         for tool in tools:
-            server.tool(annotations=ToolAnnotations(**hints))(tool)
+            server.tool(annotations=ToolAnnotations(**hints), meta=meta)(tool)
         return asyncio.run(server.list_tools())
 
     def dumped(tools) -> str:
@@ -442,7 +461,9 @@ def test_the_wrapper_leaves_both_tool_lists_byte_for_byte():
     def budget(tools) -> int:
         return sum(len(t.model_dump_json(exclude_none=True, by_alias=True)) for t in tools)
 
-    reads = bare("radialrig", rs.READ_TOOLS, read_only_hint=True,
+    # The read tools carry the start-up mark (PLAN-0026 phase 5); the
+    # bare list carries it too, so only the wrapper is compared.
+    reads = bare("radialrig", rs.READ_TOOLS, meta=rs.START_UP_MARK, read_only_hint=True,
                  destructive_hint=False, idempotent_hint=True, open_world_hint=False)
     served = asyncio.run(rs.build_server().list_tools())
     assert dumped(served) == dumped(reads)

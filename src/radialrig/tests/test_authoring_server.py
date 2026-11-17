@@ -22,7 +22,9 @@ from radialrig import doc_txn as txn
 from radialrig import validate_docs as v
 from radialrig.doc_core import parse_frontmatter
 
-SCHEMA_BUDGET = 3000  # raised from 2,500 by owner ruling 2026-09-05 (SPEC-3)
+# Raised from 2,500 by owner ruling 2026-09-05, and to 4,000 by owner
+# ruling 2026-11-13 (SPEC-3, D-18 constraint 6).
+SCHEMA_BUDGET = 4000
 
 # The sentence a person approves (PLAN-0012 phase 2). Every call carries one.
 S = "The test record now rules what the test needs."
@@ -896,6 +898,160 @@ def test_propagation_refuses_a_body_edit_where_there_is_no_ruling_section(corpus
     assert "no '## Ruling' section" in out["message"]
 
 
+# --- The unchanged list (SPEC-3 section 4.3, PLAN-0026 phase 3) --------
+
+def stamp(raw: bytes, was: str = "2026-08-01") -> bytes:
+    """`raw` with its one last-verified line moved to TODAY, nothing else."""
+    old, new = f"last-verified: {was}".encode(), f"last-verified: {TODAY.isoformat()}".encode()
+    assert raw.count(old) == 1, "the fixture must hold the line once"
+    return raw.replace(old, new)
+
+
+def amend_with(unchanged, propagate=None):
+    return a.amend_ruling(
+        id="D-90", mode="position", text=record(ruling="The ruling changed."),
+        summary=S,
+        archive={
+            "path": ARCHIVE_REL,
+            "text": archived_text("D-90-history-2026-08", replaced_by="D-90"),
+        },
+        propagate=propagate, unchanged=unchanged,
+    )
+
+
+def retire_with(unchanged, propagate=None):
+    return a.retire_ruling(
+        id="D-90", text=archived_text("D-90"), summary=S,
+        propagate=propagate, unchanged=unchanged,
+    )
+
+
+CALLS = {"amend_ruling": amend_with, "retire_ruling": retire_with}
+
+
+@pytest.mark.parametrize("verb", sorted(CALLS))
+def test_a_dependent_named_unchanged_gets_todays_date_and_nothing_else(corpus, verb):
+    """PLAN-0026 phase 3: the caller names, by path alone, a dependent it
+    read and left as it is, and the verb moves that file's last-verified
+    line to the review date. No other byte of the file moves."""
+    before = isolation(corpus)
+    raw = (corpus / DEP).read_bytes()
+    out = CALLS[verb]([DEP])
+    assert out["kind"] == "applied", out
+    assert DEP in out["paths"]
+    assert (corpus / DEP).read_bytes() == stamp(raw)
+    assert isolation(corpus) == before
+
+
+def test_the_stamp_keeps_windows_line_endings(corpus):
+    """A working tree under core.autocrlf holds docs with CRLF endings, as
+    this repository's does on Windows. The verb replaces the one line on
+    the file's own bytes; it never writes back a normalized copy
+    (BUG-0011)."""
+    crlf = read(corpus, DEP).replace("\n", "\r\n").encode("utf-8")
+    (corpus / DEP).write_bytes(crlf)
+    out = amend_with([DEP])
+    assert out["kind"] == "applied", out
+    assert (corpus / DEP).read_bytes() == stamp(crlf)
+
+
+def test_a_dependent_already_dated_today_is_left_alone(corpus):
+    """SPEC-3 section 4.3: a file already dated today carries the mark
+    this review would leave, so the verb does not write it."""
+    write(corpus, DEP, record(
+        rid="D-91", depends_on="D-90", last_verified=TODAY.isoformat(),
+        ruling="Depends on D-90.", tail="\n## Why\n\nBecause D-90 says so.\n",
+    ))
+    raw = (corpus / DEP).read_bytes()
+    out = amend_with([DEP])
+    assert out["kind"] == "applied", out
+    assert DEP not in out["paths"]
+    assert (corpus / DEP).read_bytes() == raw
+
+
+def test_a_path_named_twice_is_stamped_once(corpus):
+    raw = (corpus / DEP).read_bytes()
+    out = amend_with([DEP, DEP])
+    assert out["kind"] == "applied", out
+    assert out["paths"].count(DEP) == 1
+    assert (corpus / DEP).read_bytes() == stamp(raw)
+
+
+def test_the_two_lists_together_cover_the_chain(corpus):
+    """Part of a chain may come back as text and the rest by name; a
+    dependent in neither list is refused by name, as it always was."""
+    far = "docs/decisions/D-94-far.md"
+    write(corpus, far, record(rid="D-94", depends_on="D-91", ruling="Depends on D-91."))
+    before = blobs(corpus)
+    missed = amend_with([], propagate=[dep_entry()])
+    assert missed["kind"] == "error", missed
+    assert far in missed["message"]
+    assert blobs(corpus) == before
+
+    out = amend_with([far], propagate=[dep_entry()])
+    assert out["kind"] == "applied", out
+    assert fm(corpus, far)["last-verified"] == TODAY.isoformat()
+    assert fm(corpus, DEP)["last-verified"] == "2026-08-14"
+
+
+@pytest.mark.parametrize("stray", ["another record", "the record itself", "no file", "not UTF-8"])
+@pytest.mark.parametrize("verb", sorted(CALLS))
+def test_an_unchanged_path_outside_the_chain_is_refused_by_name(corpus, verb, stray):
+    path = {
+        "another record": "docs/decisions/D-92-other.md",
+        "the record itself": "docs/decisions/D-90-test.md",
+        "no file": "docs/decisions/D-99-nowhere.md",
+        "not UTF-8": BAD,
+    }[stray]
+    if stray == "another record":
+        write(corpus, path, record(rid="D-92"))
+    if stray == "not UTF-8":
+        seed_bad(corpus)
+    before = blobs(corpus)
+    out = CALLS[verb]([DEP, path])
+    assert out["kind"] == "error", out
+    assert path in out["message"] and "chain" in out["message"]
+    assert blobs(corpus) == before
+
+
+@pytest.mark.parametrize("verb", sorted(CALLS))
+def test_a_path_in_both_lists_is_refused_by_name(corpus, verb):
+    before = blobs(corpus)
+    out = CALLS[verb]([DEP], propagate=[dep_entry()])
+    assert out["kind"] == "error", out
+    assert DEP in out["message"] and "propagate" in out["message"]
+    assert blobs(corpus) == before
+
+
+@pytest.mark.parametrize("verb", sorted(CALLS))
+def test_a_dependent_with_no_last_verified_line_is_refused_by_name(corpus, verb):
+    """The verb adds no field (SPEC-3 section 4.3). A line that looks like
+    the field but sits in the body is not the field, and stays as it is."""
+    bare = record(
+        rid="D-91", depends_on="D-90", ruling="Depends on D-90.",
+        tail="\n## Why\n\nlast-verified: 2020-01-01\n",
+    ).replace("last-verified: 2026-08-01\n", "", 1)
+    write(corpus, DEP, bare)
+    before = blobs(corpus)
+    out = CALLS[verb]([DEP])
+    assert out["kind"] == "error", out
+    assert DEP in out["message"] and "last-verified" in out["message"]
+    assert "chain" not in out["message"]
+    assert blobs(corpus) == before
+
+
+def test_metadata_mode_takes_no_unchanged_list(corpus):
+    """8.6 propagates nothing, so it stamps nothing either."""
+    before = blobs(corpus)
+    out = a.amend_ruling(
+        id="D-90", mode="metadata", text=record(last_verified="2026-08-14"),
+        summary=S, unchanged=[DEP],
+    )
+    assert out["kind"] == "error", out
+    assert "8.6" in out["message"]
+    assert blobs(corpus) == before
+
+
 # --- retire_ruling (SPEC-1 8.2 and 8.3) --------------------------------
 
 def test_retire_without_a_successor(corpus):
@@ -1154,6 +1310,22 @@ def test_the_summary_is_carried_by_the_schema():
         assert "summary" in tool.input_schema["required"], tool.name
         assert spec["type"] == "string" and "sentence" in spec["description"], tool.name
         assert "minLength" not in spec and "maxLength" not in spec, tool.name
+        # The description states the limit the verb applies (SPEC-3
+        # section 1 guarantee 6, PLAN-0026 phase 3).
+        assert f"{a.SUMMARY_MAX} characters" in spec["description"], tool.name
+
+
+def test_the_unchanged_list_is_carried_by_the_schema():
+    """SPEC-3 sections 4 and 5: amend_ruling and retire_ruling take an
+    optional list of paths, each non-empty; propose_record takes none."""
+    tools = {t.name: t.input_schema for t in tool_list()}
+    assert "unchanged" not in tools["propose_record"]["properties"]
+    for name in ("amend_ruling", "retire_ruling"):
+        spec = tools[name]["properties"]["unchanged"]
+        assert "unchanged" not in tools[name].get("required", []), name
+        arrays = [b for b in spec.get("anyOf", [spec]) if b.get("type") == "array"]
+        assert len(arrays) == 1, (name, spec)
+        assert arrays[0]["items"] == {"type": "string", "minLength": 1}, name
 
 
 # --- Schema cost and the read-only session -----------------------------
@@ -1218,3 +1390,37 @@ def test_the_handshake_names_the_installed_engine():
     info = handshake(a.build_server())
     assert info.name == "radialrig-write"
     assert info.version == mnt.installed_version()
+
+
+def test_the_handshake_says_when_to_call_the_write_verbs():
+    """PLAN-0026 phase 5: two or three sentences at session start, naming
+    every verb."""
+    from radialrig.tests.test_retrieval_server import initialize, sentences
+
+    said = initialize(a.build_server()).instructions
+    assert said == a.INSTRUCTIONS
+    assert 2 <= len(sentences(said)) <= 3, said
+    for verb in a.VERBS:
+        assert verb.__name__ in said
+
+
+@pytest.mark.parametrize("rule", [
+    "a direct edit under SPEC-1 section 8 is the fallback",
+    "returns the ruling as one plain sentence",
+])
+def test_the_write_instructions_keep_the_route_maps_rule_7(rule):
+    """PLAN-0026 phase 6 review (O-3): the start-up sentences give rule 7
+    as the route map the mount writes gives it, so they state no looser
+    fallback and no other summary (phase 5 prescription 1)."""
+    from radialrig import mount as mnt
+
+    seed = mnt._seed_bytes(mnt.SEED_SECTION_SOURCE).decode("utf-8")
+    assert rule in " ".join(seed.split())
+    assert rule in a.INSTRUCTIONS
+
+
+def test_no_write_verb_asks_to_load_at_session_start():
+    """PLAN-0026 phase 5 and SPEC-2: the start-up mark is the read
+    tools' alone, so the write verbs stay behind a tool search."""
+    for tool in tool_list():
+        assert "anthropic/alwaysLoad" not in (tool.meta or {}), tool.name
