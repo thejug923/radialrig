@@ -1,4 +1,5 @@
-/* The bootstrap screen's only script — PLAN-0008 Phase 5.
+/* The install screen's only script — PLAN-0008 Phase 5, redrawn by
+   PLAN-0027 phase 4.
 
    The markup ships with empty slots and none of the words. This fills
    them from strings.json, which the shell and the pytest hold read too,
@@ -6,15 +7,17 @@
 
    Nothing here decides anything. The shell sends one picture of what the
    screen should show — which step is running, which stop was reached —
-   and this draws it. The two presses send their consent and their retry
-   back and draw whatever comes back.
+   and this draws it in one of three states: Ready, Working or Stopped.
+   The two presses send their consent and their retry back and draw
+   whatever comes back.
 
    The one thing this file knows that the picture does not carry is where
-   a named step or a named stop sits in the run. The shell sends a key;
-   the run is nine steps long and always has been; so the position is
-   read out of the two lists below rather than sent over the wire. That
-   is placement, not a decision: the same key always sits in the same
-   place.
+   a key sits among the four steps the screen names. The shell sends one
+   of nine progress keys, as it always has; the screen groups them into
+   Downloading, Checking the download, Installing and Starting, so the
+   step is read out of the table below rather than sent over the wire.
+   That is placement, not a decision: the same key always sits in the
+   same place.
 
    One script file rather than a block inside the document: a block is a
    surface no sweep reaches by name, and the window's own policy
@@ -32,9 +35,11 @@
      build drives. It belongs to the build rather than to any stop, so it
      arrives on every picture the way the platform does (BUG-0017). */
   var NEEDED = "{needed}";
+  /* Between a step's count and its name in Details. */
+  var DOT = " · ";
 
-  /* The steps, in the order they run. The length of this list is the
-     length of the track and the number the two step sentences say. */
+  /* The nine keys the shell sends while a first install runs, in the
+     order they run. */
   var STEPS = [
     "progress_probe",
     "progress_download",
@@ -47,30 +52,40 @@
     "progress_start"
   ];
 
-  /* The step each in-run stop belongs to: the step that asks the
-     question it failed to answer. Drawn only when the run actually got
-     somewhere — a stop from the opening look at the machine carries no
-     progress, and a count there would name a step that never
-     executed. */
-  var STOPPED_AT = {
-    fail_uv_probe: "progress_probe",
-    fail_download: "progress_download",
-    fail_checksum: "progress_verify",
-    fail_extract: "progress_extract",
-    fail_path_write: "progress_path",
-    fail_package_download: "progress_install",
-    fail_package_checksum: "progress_install",
-    fail_engine_install: "progress_install",
-    fail_recovery: "progress_install",
-    fail_foreign_exe: "progress_install",
-    fail_tool_dir: "progress_resolve",
-    fail_engine_old: "progress_version",
-    fail_engine_unread: "progress_version",
-    fail_spawn: "progress_start",
-    fail_line_timeout: "progress_start",
-    fail_line_unparsed: "progress_start",
-    fail_engine_stopped: "progress_start"
+  /* The four steps the screen names, in order. Their count is the
+     number the two step sentences say. */
+  var STEP_NAMES = ["step_download", "step_check", "step_install", "step_start"];
+
+  /* Which of the four each key belongs to (wording.md section 4). The
+     engine swap's own line replaces the engine, which is installing. */
+  var STEP_OF = {
+    progress_probe: 1,
+    progress_download: 1,
+    progress_verify: 2,
+    progress_extract: 3,
+    progress_path: 3,
+    progress_install: 3,
+    progress_resolve: 3,
+    swap_running: 3,
+    progress_version: 4,
+    progress_start: 4
   };
+
+  /* The engine swap's line, which gives the Working card its own
+     heading and sentence. */
+  var SWAP = "swap_running";
+
+  /* The stop an engine sends when it ends while the window is open. The
+     shell sends it only once the engine has named its address, and an
+     engine that ends after the pass finished, with its pages up, ended
+     no installation (PLAN-0027 phase 4 review). */
+  var ENGINE_ENDED = "fail_engine_stopped";
+
+  /* A swap that gave up while programs it names still hold the engine
+     says so in its heading and its next step; the sentence that names
+     them stays in Details, under the step (wording.md, Screen 1). */
+  var HELD_BY_NAME = "swap_held";
+  var HELD_STOP = "recovery_held";
 
   var words = null;
   var latest = null;
@@ -82,6 +97,13 @@
 
   /* The engine version this build needs, from the latest picture. */
   var needed = "";
+
+  /* Whether the pass on screen is the engine swap. The swap's own line
+     arrives once, and the steps after it (finding the program, its
+     version, the start) belong to the same replacement, so the card
+     keeps its heading until the pass ends. A fresh pass opens with no
+     step at all, which is where this is cleared. */
+  var replacing = false;
 
   /* One value from the strings file, resolved to this platform's own
      sentence. A flat value is already the sentence; a per-platform pair
@@ -115,14 +137,21 @@
 
      A line whose slot has nothing to put in it comes back empty, and an
      empty line is not drawn at all. The alternative is a line filled
-     with the empty string, which on a quoted detail reads as an error
+     with the empty string, which on an error line reads as an error
      that said nothing and on a named path reads as a place that is not
      one. Nothing shown beats either.
 
      The needed version goes in first, so that a detail quoting a
-     machine's own words is never read for a slot of its own. */
+     machine's own words is never read for a slot of its own.
+
+     Only the sentence's own spacing is tidied, and before anything goes
+     in. A value goes in exactly as it came: a path with two spaces in a
+     row names a different folder than the same path with one, and an
+     error over several lines is the machine's own words (PLAN-0027
+     phase 4 review). */
   function tidy(text, detail) {
     if (typeof text !== "string") { return ""; }
+    text = text.replace(/\s+/g, " ").trim();
     if (text.indexOf(NEEDED) >= 0) {
       if (!needed) { return ""; }
       text = text.split(NEEDED).join(needed);
@@ -131,38 +160,45 @@
       if (!detail) { return ""; }
       text = text.split(SLOT).join(detail);
     }
-    return text.replace(/\s+/g, " ").trim();
+    return text;
   }
 
-  /* One sentence's two lines: what the shell says, and what more there
-     is to say under it. A sentence written as one line has nothing under
-     it, and the second line comes back empty. */
+  /* One sentence's three parts, as the strings file splits them: what
+     happened, what to do next, and the line Details shows. A sentence
+     written as one line has nothing after it, and the later parts come
+     back empty. */
   function lines(key, detail) {
     var text = words ? pick(words[key]) : null;
-    if (typeof text !== "string" || !text) { return ["", ""]; }
+    if (typeof text !== "string" || !text) { return ["", "", ""]; }
     var parts = text.split("\n");
-    return [tidy(parts[0], detail), tidy(parts.slice(1).join(" "), detail)];
+    return [
+      tidy(parts[0], detail),
+      tidy(parts[1], detail),
+      tidy(parts.slice(2).join(" "), detail)
+    ];
   }
 
   function say(key, detail) {
     return lines(key, detail)[0];
   }
 
-  function more(key, detail) {
-    return lines(key, detail)[1];
-  }
-
   /* Everything the markup names, written once.
 
-     None of it changes while the window is open: the gate says the same
-     thing on every machine, and the two presses carry the same labels.
-     The landing rows are objects rather than flat keys, so that a label
-     and the path it labels are one value in the file and cannot be
-     separated by an edit to either. */
+     None of it changes while the window is open: the masthead, the
+     Ready card and the step names say the same thing on every machine,
+     and the two presses carry the same labels. The landing rows are
+     objects rather than flat keys, so that a label and the path it
+     labels are one value in the file and cannot be separated by an edit
+     to either. */
   function paint() {
     var keyed = document.querySelectorAll("[data-key]");
     for (var i = 0; i < keyed.length; i++) {
       put(keyed[i], say(keyed[i].getAttribute("data-key"), ""));
+    }
+    var labeled = document.querySelectorAll("[data-label]");
+    for (var l = 0; l < labeled.length; l++) {
+      labeled[l].setAttribute("aria-label",
+        say(labeled[l].getAttribute("data-label"), ""));
     }
     var rows = document.querySelectorAll("[data-block]");
     for (var r = 0; r < rows.length; r++) {
@@ -175,60 +211,109 @@
     }
   }
 
-  /* Where a key sits in the run, counted from one. Zero is a key the run
-     has no step for, and a screen with no step to name draws no count
-     and no track rather than an invented one. */
+  /* Which of the four steps a key belongs to, counted from one. Zero is
+     a key no step stands for, and a screen with no step to name draws
+     no count rather than an invented one. */
   function stepOf(key) {
-    var found = STEPS.indexOf(key);
-    return found < 0 ? 0 : found + 1;
+    return STEP_OF[key] || 0;
   }
 
-  /* The track: everything before the step is done, the step itself is
-     marked, and everything after it is untouched. */
-  function track(step, mark) {
-    var node = at("steps-track");
+  /* The step's count and its name, as Details says them. */
+  function counted(sentence, step) {
+    return say(sentence, String(step)) + DOT + say(STEP_NAMES[step - 1], "");
+  }
+
+  /* The four steps: everything before the step is done, the step itself
+     is current, and everything after it is still to come. */
+  function track(step) {
+    var node = at("progress");
     if (!node) { return; }
     var cells = node.children;
     for (var i = 0; i < cells.length; i++) {
-      cells[i].className = i + 1 < step ? "done" : (i + 1 === step ? mark : "");
+      cells[i].className = i + 1 < step ? "done" : (i + 1 === step ? "current" : "");
+      if (i + 1 === step) {
+        cells[i].setAttribute("aria-current", "step");
+      } else {
+        cells[i].removeAttribute("aria-current");
+      }
     }
   }
 
-  /* The running and stopped panel, from one picture of it. */
+  /* The Working and Stopped card, from one picture of it. */
   function status(view) {
-    var running = view.phase === "running" && !!view.progress;
+    var running = view.phase === "running" && !view.failure;
     var stopped = !!view.failure;
     show(at("state-status"), running || stopped);
     if (!running && !stopped) { return; }
 
     var key = running ? view.progress : view.failure.key;
     var detail = running ? "" : view.failure.detail;
-    var step = stepOf(running ? key : (view.progress ? STOPPED_AT[key] : ""));
-    /* The screen's one amber, on the running step or, when no press
-       exists to carry it, on the step the run stopped at. */
-    var mark = running ? "active" : (view.retry ? "stopped" : "stopped-final");
+    /* The step is the one the pass reached, on a stop as while it runs.
+       The shell keeps it on the picture across a stop and clears it as
+       each pass opens and as each one finishes, so a stop from the
+       opening look, or one after the pass was done, counts no step. A
+       stop's own key never chooses it: one key is sent from more than one
+       place in the pass (PLAN-0027 phase 4 review). */
+    var step = stepOf(view.progress);
+    /* An engine that ended after its pages were up says what happened
+       with no "Installation stopped" over it: the pass had finished, which
+       is when the shell clears its step. */
+    var ended = stopped && key === ENGINE_ENDED && !view.progress;
 
-    show(at("step-label"), step > 0);
-    show(at("steps-track"), step > 0);
-    if (step > 0) {
-      put(at("step-label"),
-        say(running ? "step_running" : "step_stopped", String(step)));
-      track(step, mark);
+    show(at("stopped-row"), stopped && !ended);
+    /* The steps are drawn while the run is going, and their current one
+       is the screen's one amber; a stop says what happened instead. */
+    show(at("progress"), running);
+    show(at("actions"), stopped && !!view.retry);
+
+    var heading = "";
+    var saying = "";
+    var doing = "";
+    var held = "";
+    var error = "";
+    if (running) {
+      if (replacing) {
+        var swapped = lines(SWAP, "");
+        heading = swapped[0];
+        saying = swapped[1];
+      } else {
+        heading = say("working_head", "");
+        saying = say("working_lede", "");
+      }
+      track(step);
+      /* What the step is doing right now, in one line behind Details. */
+      doing = STEPS.indexOf(key) >= 0 ? say(key, "") : "";
+    } else {
+      /* A swap that gave up while named programs still hold the engine
+         heads its stop with what holds it; the machine's own words stay
+         the failure's. */
+      var named = view.held && view.held.key === HELD_BY_NAME;
+      var said = lines(named ? HELD_STOP : key, detail);
+      heading = said[0];
+      saying = said[1];
+      error = lines(key, detail)[2];
+      held = view.held ? say(view.held.key, view.held.detail) : "";
     }
 
-    put(at("saying"), say(key, detail));
-    var under = more(key, detail);
-    show(at("detail"), !!under);
-    put(at("detail"), under);
+    put(at("heading"), heading);
+    put(at("saying"), saying);
+    show(at("saying"), !!saying);
+
+    var count = step > 0 ? counted(running ? "step_running" : "step_stopped", step) : "";
+    put(at("step-label"), count);
+    show(at("step-label"), !!count);
+    put(at("doing"), doing);
+    show(at("doing"), !!doing);
     /* The one sentence an engine swap that gave up adds under its stop:
        the programs that still hold the engine, or that none was found
        running from its folders (PLAN-0021 phase 2, prescription 4). The
        shell sends it as its own key and value, so this draws it and
        composes nothing. */
-    var held = stopped && view.held ? say(view.held.key, view.held.detail) : "";
-    show(at("held"), !!held);
     put(at("held"), held);
-    show(at("actions"), stopped && !!view.retry);
+    show(at("held"), stopped && !!held);
+    put(at("detail"), error);
+    show(at("detail"), !!error);
+    show(at("status-details"), !!(count || doing || held || error));
   }
 
   /* How long one picture holds the screen before the next queued one
@@ -265,15 +350,20 @@
     if (!words || !view) { return; }
 
     /* The first picture is what says which platform this build is for.
-       The gate was painted before any picture arrived, so the slots
-       that differ per platform are painted again now that the answer
-       is known. */
+       The Ready card was painted before any picture arrived, so the
+       slots that differ per platform are painted again now that the
+       answer is known. */
     if (view.platform && platform !== view.platform) {
       platform = view.platform;
       paint();
     }
     if (typeof view.engine_needed === "string") {
       needed = view.engine_needed;
+    }
+    if (view.progress === SWAP) {
+      replacing = true;
+    } else if (view.phase === "gate" || (view.phase === "running" && !view.progress)) {
+      replacing = false;
     }
 
     show(at("state-gate"), view.phase === "gate");
@@ -284,9 +374,11 @@
       if (view.notice) { put(notice, say(view.notice.key, view.notice.detail)); }
     }
 
+    /* What the PATH read found sits behind the Ready card's Details, on
+       the platform whose step reads rather than writes. */
     var report = at("path-report");
     if (report) {
-      show(report, !!view.path_report);
+      show(at("gate-details"), !!view.path_report);
       if (view.path_report) {
         put(report, say(view.path_report.key, view.path_report.detail));
       }

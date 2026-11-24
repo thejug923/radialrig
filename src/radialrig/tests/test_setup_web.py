@@ -63,13 +63,6 @@ SKILL_DIR = ".claude/skills/session-handoff"
 AGENTS = tuple(sk.HARNESSES.values())
 FIRST, SECOND = AGENTS[0], AGENTS[1]
 
-# One agent's group of boxes on the page: its label as the legend, the
-# Tick all control beside it, then everything under it.
-AGENT_GROUP = re.compile(
-    r'<fieldset class="skills agent"><legend>([^<]*)</legend>(<button class="tick" '
-    r'type="button" aria-label="[^"]*">[^<]*</button>)?(.*?)</fieldset>', re.S)
-BOX = re.compile(r'<input type="checkbox" name="skill" value="([^"]*)"([^>]*)>')
-
 
 def boxes(*names: str, agents=None) -> list[str]:
     """What the boxes post for these skills: one value per (agent, skill)
@@ -78,19 +71,10 @@ def boxes(*names: str, agents=None) -> list[str]:
             for harness in (agents or AGENTS) for name in names]
 
 
-def groups(page: str) -> list[tuple[str, bool, list[tuple[str, str]]]]:
-    """Every agent's group on the page: its label, whether Tick all stands
-    beside it, and its boxes as (value, attributes)."""
-    return [
-        (html.unescape(label), bool(tick), BOX.findall(inner))
-        for label, tick, inner in AGENT_GROUP.findall(page)
-    ]
-
-ROW = re.compile(
-    r'<tr><td class="verb"><span class="chip[^"]*">([a-z]+)</span></td>'
-    r'<td class="path">([^<]*)</td><td class="why">([^<]*)</td></tr>'
-)
 TAGS = re.compile(r"<[^>]+>")
+# A folder path drawn in pieces that wrap only after a separator
+# (`setup_web.folder_path`, PLAN-0027 phase 5 C3) reads as one path.
+PIECES = re.compile(r'<span class="seg">([^<]*)</span>(?:<wbr>)?')
 EXTERNAL_REF = re.compile(r'(?:href|src)="(?!data:|/setup)[a-z]+:', re.I)
 EXTERNAL_CSS = re.compile(r'url\(\s*["\']?(?!data:)[a-z]+:', re.I)
 
@@ -290,31 +274,9 @@ def walk():
 
 # --- helpers ----------------------------------------------------------
 
-def rows(page: str) -> list[tuple[str, str, str]]:
-    import html as _html
-
-    return [
-        tuple(_html.unescape(cell) for cell in match)
-        for match in ROW.findall(page)
-    ]
-
-
-def expected_rows(dispositions) -> list[tuple[str, str, str]]:
-    # The page's fill for the engine's empty wordings rides along here;
-    # the sentences themselves are pinned word for word in
-    # test_manage_actions' wrote-table test.
-    out = []
-    for d in dispositions:
-        reason = (report.conflict_reason(d.path) if d.code == "CONFLICT"
-                  else mnt.reason_text(d)
-                  or setup_web.WROTE_REASONS.get(d.code, ""))
-        out.append((d.verb, d.path, reason))
-    return out
-
-
 def visible(page: str) -> str:
     body = page.split("<main>", 1)[-1].split("</main>", 1)[0]
-    return TAGS.sub(" ", body)
+    return TAGS.sub(" ", PIECES.sub(r"\1", body))
 
 
 def text_of(page: str) -> str:
@@ -328,6 +290,125 @@ def text_of(page: str) -> str:
     import html as _html
 
     return " ".join(_html.unescape(visible(page)).split())
+
+
+# --- the screen, read back (PLAN-0027 phase 2) -------------------------
+# Add a project is one screen with a card for a setup that can't start
+# and one result line for a press. These read each piece back off the
+# markup the way a reader meets it.
+
+RESULT = re.compile(
+    r'<div class="result ([a-z]+)" role="status" aria-live="polite">(.*?)</div>'
+    r"((?:<details>.*?</details>)?)</div>", re.S)
+CHANGED = re.compile(
+    r"<li><code>([^<]*)</code> " + setup_web.MIDDOT + r" ([^<]*)</li>")
+FILE_ITEM = re.compile(
+    r'<li(?: data-for="[^"]*")?( hidden)?><code>([^<]*)</code>'
+    r"(?: " + setup_web.MIDDOT + r" ([^<]*))?</li>")
+BOX = re.compile(
+    r'<input type="checkbox" name="skill" value="([^"]*)" data-agent="([^"]*)" '
+    r'data-shows="[^"]*" aria-label="([^"]*)"( checked)?>')
+COMMANDS_BLOCK = '<div class="commands"><h3>Commands</h3>'
+COPY_ITEM = re.compile(
+    r'(<div data-for="[^"]*"( hidden)?>)?<div class="copy-line"><code>[^<]*</code>'
+    r'<button class="copy" type="button" data-copy="([^"]*)"')
+
+
+def main_of(page: str) -> str:
+    return page.split("<main>", 1)[-1].split("</main>", 1)[0]
+
+
+def flat(markup: str) -> str:
+    return " ".join(html.unescape(TAGS.sub(" ", markup)).split())
+
+
+def result_of(page: str) -> tuple[str, str, str, str] | None:
+    """The press's one result line: its tone, its sentence, the
+    after-press sentence or "", and its Details' text or ""."""
+    found = RESULT.search(main_of(page))
+    if found is None:
+        return None
+    tone, words, more = found.groups()
+    said = re.findall(r"<p>([^<]*)</p>", words)
+    warn = re.findall(r'<p class="warn">([^<]*)</p>', words)
+    return (tone, html.unescape(said[0]), html.unescape(warn[0]) if warn else "",
+            flat(more))
+
+
+def changed_of(page: str) -> list[tuple[str, str]]:
+    """The files a result line's Details lists, each with its tag."""
+    found = RESULT.search(main_of(page))
+    assert found is not None, "the page carries no result line"
+    return [(html.unescape(path), tag) for path, tag in CHANGED.findall(found.group(3))]
+
+
+def expected_changed(*groups) -> list[tuple[str, str]]:
+    """What a result line lists for these rows: each one that changed or
+    kept something, tagged as the result line's grammar tags it."""
+    return [(mnt.one_line(d.path), setup_web.TAGS[d.verb])
+            for rows_ in groups for d in rows_ if d.verb in setup_web.TAGS]
+
+
+def card_of(page: str) -> tuple[str, str, str] | None:
+    """The card a setup that can't start, or stopped, says it on: its
+    heading, its one sentence, and its Details' text."""
+    body = main_of(page)
+    if '<section class="card"' not in body:
+        return None
+    card = body.split('<section class="card"', 1)[1].split("</section>", 1)[0]
+    assert f"<span>{setup_web.STOPPED_STATE}</span>" in card
+    head = re.search(r"<h1>([^<]*)</h1>", card).group(1)
+    said = TAGS.sub("", re.search(r'<p class="path">.*?</p><p>(.*?)</p>', card).group(1))
+    details = re.search(r'<details><summary>Details</summary><div class="drawer">'
+                        r"(.*?)</div></details>", card, re.S)
+    return html.unescape(head), html.unescape(said), flat(details.group(1)) if details else ""
+
+
+def closing_of(page: str) -> str:
+    """What a finished page says about its server, or ""."""
+    found = re.search(r'<p class="closing">([^<]*)</p>', main_of(page))
+    return html.unescape(found.group(1)) if found else ""
+
+
+def files_listed(page: str) -> list[tuple[str, str, bool]]:
+    """Details' Project files: each file, its tag, and whether it shows
+    as the last post left the boxes."""
+    body = main_of(page)
+    block = body.split('<ul class="files">', 1)[1].split("</ul>", 1)[0]
+    return [(html.unescape(path), tag, not hidden)
+            for hidden, path, tag in FILE_ITEM.findall(block)]
+
+
+def grid_boxes(page: str) -> list[tuple[str, str, bool]]:
+    """Every skill box on the screen, in order: what it posts, its name
+    for a reader by ear, and whether it is ticked."""
+    return [(value, html.unescape(name), bool(checked))
+            for value, _, name, checked in BOX.findall(page)]
+
+
+def shown_commands(page: str) -> list[str]:
+    """The commands Details lists before the press, as the last post left
+    the boxes: a line whose box is unticked is drawn hidden."""
+    body = main_of(page)
+    if COMMANDS_BLOCK not in body:
+        return []
+    block = body.split(COMMANDS_BLOCK, 1)[1].split("</details>", 1)[0]
+    return [html.unescape(line) for _, hidden, line in COPY_ITEM.findall(block)
+            if not hidden]
+
+
+def ran_commands(page: str) -> list[str]:
+    """The commands a press ran, as its result line's Details lists them."""
+    found = RESULT.search(main_of(page))
+    if found is None or COMMANDS_BLOCK not in found.group(3):
+        return []
+    block = found.group(3).split(COMMANDS_BLOCK, 1)[1]
+    return [html.unescape(line) for _, _, line in COPY_ITEM.findall(block)]
+
+
+def ready(root: Path) -> str:
+    """The ready screen's heading for a folder."""
+    return f"<h1>Set up RadialRig in {html.escape(root.name, quote=False)}</h1>"
 
 
 # The marker the review and already-mounted forms carry: a post from a
@@ -360,12 +441,13 @@ def test_a_page_walkthrough_matches_the_command_line_byte_for_byte(
     assert headers["Location"] == f"/setup?s={run.session.token}"
 
     review = run.page()
-    assert setup_web.REVIEW_HEAD in review
-    assert tree(page_root) == tree(cli_root), "the review state wrote something"
+    assert ready(page_root) in review
+    assert tree(page_root) == tree(cli_root), "the ready screen wrote something"
 
     status, mounted, _ = run.post(mount_form(run))
     assert status == 200
-    assert f"Mounted onto {SCOPE}." in mounted
+    assert result_of(mounted)[:3] == (
+        setup_web.RESULT_DONE, f"Set up RadialRig in {page_root.name}.", "")
     assert run.wait() == report.OK
 
     result = mnt.mount(cli_root, scope=SCOPE, owner=mnt.DEFAULT_OWNER)
@@ -380,9 +462,11 @@ def test_a_page_walkthrough_matches_the_command_line_byte_for_byte(
         assert page_files[rel] == data, f"{rel} differs from the command line's mount"
     assert snapshot(page_root) == snapshot(cli_root)
 
-    # And the page reported exactly the command line's report lines.
-    assert rows(mounted) == expected_rows(result.dispositions())
-    assert report.next_step(page_root)[0] in mounted
+    # And the line's Details lists exactly what the command line reported
+    # it wrote, with the next step and the one command the press ran.
+    assert changed_of(mounted) == expected_changed(result.dispositions())
+    assert report.next_step(page_root)[0] in result_of(mounted)[3]
+    assert ran_commands(mounted) == [f"radialrig mount {page_root} --scope {SCOPE}"]
 
 
 @pytest.mark.parametrize("tracked", [False, True])
@@ -412,138 +496,106 @@ def test_the_mounted_page_names_the_validate_command_this_project_can_run(
     assert hidden[0] not in mounted and hidden[1] not in page
 
 
-# The seven rows the accepted wireframe draws over the twelve paths a
-# mount writes, in its order and in its words. Spelled out here rather than read
-# off `MOUNT_FAMILIES`: a table pinned against the table that renders it
-# pins nothing.
-FAMILY_ROWS = [
-    (mnt.MERGED, ".mcp.json",
-     "one RadialRig entry added; nothing else in the file changes"),
-    (mnt.CREATED, ".radialrig/mount.json",
-     "the record RadialRig uses to take everything back out"),
-    (mnt.APPENDED, "AGENTS.md",
-     "one fenced section at the end; the rest of the file is unchanged"),
-    (mnt.CREATED, "CLAUDE.md",
-     "one fenced line importing AGENTS.md, so Claude Code reads the route map"),
-    (mnt.CREATED, ".codex/config.toml",
-     "the same two servers registered for Codex, in one fenced region at the end"),
-    (mnt.CREATED, "docs/decisions/, docs/plans/, docs/archive/",
-     "three document folders, kept in git even while empty"),
-    (mnt.CREATED, "docs/archive/D-00-archive-exclusion-target.md",
-     "one archived record, so the archive search filter has something to find"),
-    (mnt.CREATED, "docs/spec.md, docs/spec-git-environment.md",
-     "rules for this project's records, and default branch, pull-request "
-     "and CI rules that agents follow"),
-    (mnt.CREATED, "docs/templates/",
-     "three blank templates: decision, plan, spec"),
-]
-
-
 def test_the_review_state_shows_the_whole_plan_and_writes_nothing(
     tmp_path, walk, fixed_day,
 ):
+    """The ready screen: the folder in the heading, the two sentences,
+    and Details' Project files naming every path the setup writes, in the
+    plan's order, the files the folder already has tagged with what the
+    setup does to them. Nothing is written."""
     root = _host(tmp_path / "host")
     before = tree(root)
     run = walk(root, scope=SCOPE)
     review = run.page()
 
     plan = mnt.mount_plan(root, scope=SCOPE, owner=mnt.DEFAULT_OWNER)
-    assert rows(review) == FAMILY_ROWS
-    # Seven rows, and between them every path the plan holds: the wireframe
-    # groups the plan, it never drops a line of it. A path a later phase
-    # adds falls outside every family and takes a row of its own, so the
-    # table cannot silently stop reporting one.
-    named: set[str] = set()
-    for family in setup_web.MOUNT_FAMILIES:
-        named.update(family.paths)
-    assert named == {d.path for d in plan.dispositions()} == EXPECTED
+    assert ready(root) in review
+    assert (f'<span class="path">{html.escape(str(root), quote=False)}</span>') in review
+    # The two sentences, spelled out: a sentence asserted against the
+    # constant that renders it pins nothing.
+    assert (
+        "RadialRig adds a docs folder with templates, the instructions your agents "
+        "read, and its rule lookup and rule editor for Claude Code and Codex. Your "
+        "own files stay in place, and you can remove RadialRig later."
+    ) in text_of(review)
+    shown = [(path, tag) for path, tag, on in files_listed(review) if on]
+    assert shown == [
+        (mnt.one_line(d.path), setup_web.FILE_TAGS.get(d.verb, ""))
+        for d in plan.dispositions()]
+    assert {path for path, _ in shown} == EXPECTED
+    assert (mnt.MCP_REL, setup_web.FILE_ADDS_TO) in shown
+    assert (mnt.AGENTS_REL, setup_web.FILE_ADDS_TO) in shown
     assert tree(root) == before
-    # The rows that touch a file already standing carry the outlined
-    # chip; a created row does not, and the line under the table says
-    # which is which.
-    assert '<span class="chip touches">merged</span>' in review
-    assert '<span class="chip touches">appended</span>' in review
-    assert '<span class="chip">created</span>' in review
-    # The wireframe's own sentence, spelled out rather than compared with
-    # the constant that renders it: a hint pinned against itself pins
-    # nothing, the same reason FAMILY_ROWS is written out above.
-    assert setup_web.PLAN_HINT == (
-        "An outlined chip marks a file this project already has; the mount "
-        "changes it only in the way its row says."
-    )
-    assert setup_web.PLAN_HINT in text_of(review)
+    # Details is closed to begin with.
+    assert '<details class="settings"><summary>Details</summary>' in review
+    assert "<details class=\"settings\" open" not in review
 
 
-def test_a_path_no_family_names_still_gets_its_own_row(tmp_path):
-    """The families are a reading of the plan, not a picture over it."""
+def test_every_path_a_plan_holds_is_listed_once(tmp_path):
+    """Details' list is the plan itself, not a picture over it: a path a
+    later phase adds takes a line of its own without a word of this
+    screen changing."""
+    root = _host(tmp_path / "host")
+    session = setup_web.Session(root, SCOPE, mnt.DEFAULT_OWNER)
     extra = mnt.Disposition("docs/new-thing.md", mnt.CREATED, mnt.MOUNT_CREATED)
-    plan = mnt.mount_plan(_host(tmp_path / "host"), scope=SCOPE)
-    drawn = setup_web._families((*plan.dispositions(), extra))
-    assert drawn[:len(FAMILY_ROWS)] == FAMILY_ROWS
-    assert drawn[-1] == (mnt.CREATED, "docs/new-thing.md",
-                         mnt.reason_text(extra))
+    plan = mnt.mount_plan(root, scope=SCOPE)
+    state = setup_web.PageState(
+        setup_web.REVIEW, report.NOOP, False,
+        dispositions=(*plan.dispositions(), extra))
+    drawn = setup_web._file_items(session, state, (), setup_web._Offer())
+    paths = re.findall(r"<li><code>([^<]*)</code>", drawn)
+    assert paths == [mnt.one_line(d.path) for d in state.dispositions]
+    assert paths[-1] == "docs/new-thing.md"
+    assert len(set(paths)) == len(paths)
 
 
-def test_the_setup_page_carries_the_owners_naming(tmp_path, walk, fixed_day):
-    """The masthead, the heading, the captions and the two presses.
+def test_the_setup_page_reads_the_way_the_design_writes_it(tmp_path, walk, fixed_day):
+    """The masthead, the heading, the press and Details, in wording.md's
+    words: the masthead is the shared chrome's `RadialRig`, the press is
+    Set up project, and Details holds Project name, Owner and Refresh.
+    No table and no caption, no count, and no word the glossary keeps off
+    the screens outside a command."""
+    assert setup_web.TITLE == "RadialRig"
+    assert setup_web.SETUP_HEAD == "Set up RadialRig in {project}"
+    assert setup_web.SETUP_LABEL == "Set up project"
+    assert setup_web.REFRESH_LABEL == "Refresh"
+    assert setup_web.SCOPE_LABEL == "Project name"
+    assert setup_web.OWNER_LABEL == "Owner"
+    assert setup_web.FILES_HEAD == "Project files"
+    assert setup_web.COMMANDS_HEAD == "Commands"
+    assert setup_web.REFRESH_HINT == (
+        "After changing a name, press Refresh so the commands and the "
+        "connection use it.")
 
-    Title Case throughout, and no count in a caption the owner ruled the
-    count out of: the mount table's rows are families of paths, and the
-    skills table's caption says what the boxes write rather than how many
-    files that is.
-    """
-    assert setup_web.TITLE == "RadialRig Project Setup"
-    assert setup_web.REVIEW_HEAD == "Mount Plan"
-    assert setup_web.MOUNT_LABEL == "Mount Project"
-    assert setup_web.REFRESH_LABEL == "Refresh Plan"
-    assert setup_web.PLAN_CAPTION == "What a mount would write here:"
-    assert setup_web.SKILLS_PLAN_CAPTION == "What the checked skills would write:"
-
-    run = walk(_host(tmp_path / "host"), scope=SCOPE)
+    root = _host(tmp_path / "host")
+    run = walk(root, scope=SCOPE)
     review = run.page()
-    assert '<span class="name">RadialRig Project Setup</span>' in review
-    assert "<title>RadialRig Project Setup</title>" in review
-    assert "<h1>Mount Plan</h1>" in review
-    assert ">Mount Project</button>" in review
-    assert ">Refresh Plan</button>" in review
-
-    # The caption stands alone: no count follows either of the two the
-    # owner ruled it off, on this page or on the one the boxes draw.
-    assert "<caption>What a mount would write here:</caption>" in review
+    assert '<span class="name">RadialRig</span>' in review
+    assert "<title>RadialRig</title>" in review
+    assert "Project Setup" not in review
+    assert ready(root) in review
+    assert '<button class="primary" type="submit" name="action" value="mount">' \
+        "Set up project</button>" in review
+    assert ('<button class="refresh" type="submit" name="action" value="survey">'
+            "Refresh</button>") in review
+    said = text_of(review)
+    for words in ("Project name", "Owner", setup_web.REFRESH_HINT, "Project files",
+                  "Show commands", "Details"):
+        assert words in said, words
+    assert "<table" not in main_of(review).replace('<table class="skill-grid">', "")
+    assert "<caption>" not in review
     status, checked, _ = run.post(
         {"token": run.session.token, "action": "survey", "skill": boxes(SKILL), **CHOSEN},
     )
     assert status == 200
-    assert "<caption>What the checked skills would write:</caption>" in checked
-    assert "path(s)" not in checked
-
-    # And the lede, the two field hints and the aside under the connect
-    # offer are the wireframe's sentences. Spelled out here, then checked
-    # against the rendered page: a sentence asserted against the constant
-    # that renders it pins nothing, so each one is pinned word for word
-    # the way the six naming constants above are.
-    assert setup_web.REVIEW_LEDE == (
-        "RadialRig adds its document folders and templates to this project "
-        "and changes nothing else. It can take all of them back out later."
-    )
-    assert setup_web.SCOPE_HINT == (
-        "The name RadialRig uses for this project; it starts as the folder's "
-        "name."
-    )
-    assert setup_web.OWNER_HINT == (
-        "The name the project's documents list as their owner."
-    )
-    assert setup_web.READ_SERVER_NOTE == (
-        "The connection reads the records and can save a ruling. A saved ruling "
-        "stops in your working copy; you approve it in one sentence, and nothing "
-        "is committed until you say so."
-    )
-
-    said = text_of(review)
-    assert setup_web.REVIEW_LEDE in said
-    assert setup_web.SCOPE_HINT in said
-    assert setup_web.OWNER_HINT in said
-    assert setup_web.READ_SERVER_NOTE in said
+    for page in (review, checked):
+        # Commands and file names keep their own spelling; the words
+        # around them are the glossary's.
+        words = text_of(re.sub(r'<div class="copy-line">.*?</div>|<code>[^<]*</code>',
+                               "", page, flags=re.S))
+        assert "path(s)" not in words
+        for gone in ("mount", "harness", "register", "seed"):
+            assert not re.search(rf"\b{gone}", words, re.I), gone
 
 
 def test_the_masthead_carries_the_installed_engine(tmp_path, walk):
@@ -574,8 +626,51 @@ def test_refresh_the_plan_re_runs_the_survey(tmp_path, walk):
     (root / "docs" / "spec.md").write_bytes(b"ours\n")
     status, page, _ = run.post({"token": run.session.token, "action": "survey"})
     assert status == 200
-    assert report.refusal_head(1) in page
+    assert card_of(page)[1] == setup_web.BLOCKED_ONE
     assert run.running, "a refusal is not the end of the walkthrough"
+
+
+def test_refresh_redraws_the_commands_and_the_connection_for_a_changed_name(
+    tmp_path, walk, client_here,
+):
+    """Why Refresh stays (PLAN-0027 phase 2 prescription 6): the setup's
+    command spells a changed Project name and Owner, the connection's two
+    entries are named after the project, and a connection withheld
+    because its name is taken comes back only under a new name. All three
+    are the server's to draw again; the screen's script only follows the
+    boxes."""
+    client = cn.client_for(cn.DEFAULT_CLIENT)
+    root = _make_project(tmp_path / "pit-wall")
+    taken = cn.entry_key(client, root.name)
+    client_here.write_bytes(
+        (json.dumps({"mcpServers": {taken: {"command": "theirs"}}}, indent=2)
+         + "\n").encode("utf-8"))
+    before = tree(root)
+    run = walk(root)
+    review = run.page()
+    assert shown_commands(review) == [f"radialrig mount {root}"]
+    # The box is offered; ticked, the plan meets the taken name, and one
+    # sentence stands in the box's place.
+    status, withheld, _ = run.post({
+        "token": run.session.token, "action": "survey", "scope": root.name,
+        "owner": mnt.DEFAULT_OWNER, "connect": client.name, **CHOSEN})
+    assert status == 200
+    assert 'name="connect"' not in withheld
+    assert setup_web.CONNECT_NAME_TAKEN.format(label=client.label) in text_of(withheld)
+    assert 'value="mount"' in withheld, "a withheld connection took the setup with it"
+
+    status, renamed, _ = run.post({
+        "token": run.session.token, "action": "survey", "scope": "Pit Wall 2",
+        "owner": "Race Ops", "connect": client.name, **CHOSEN})
+    assert status == 200
+    assert shown_commands(renamed)[0] == (
+        f'radialrig mount {root} --scope "Pit Wall 2" --owner "Race Ops"')
+    assert f'name="connect" value="{client.name}" data-shows=' in renamed
+    key = cn.entry_key(client, "Pit Wall 2")
+    write_key = cn.write_entry_key(client, "Pit Wall 2")
+    assert setup_web.CLIENT_KEYS.format(key=key, write_key=write_key) in html.unescape(renamed)
+    assert setup_web.CONNECT_NAME_TAKEN.format(label=client.label) not in text_of(renamed)
+    assert tree(root) == before, "a refresh wrote something"
 
 
 # --- B: the conflict refusal ------------------------------------------
@@ -598,26 +693,28 @@ def test_a_conflict_shows_the_command_lines_refusal_and_writes_nothing(
     printed = capsys.readouterr().out
     assert tree(twin) == before
 
-    assert report.refusal_head(1) in page
-    assert report.REFUSAL_REMEDY in page
-    assert rows(page) == [(mnt.LEFT, "docs/spec.md",
-                           report.conflict_reason("docs/spec.md"))]
-    for verb, path, reason in rows(page):
-        assert path in printed
-        assert reason in printed
-        assert verb in printed
+    # One sentence of why, and behind Details each file in the way with
+    # the reason the command line prints for it.
+    head, said, details = card_of(page)
+    assert head == f"Set up RadialRig in {root.name}"
+    assert said == setup_web.BLOCKED_ONE
+    reason = report.conflict_reason("docs/spec.md")
+    assert details == f"{setup_web.BLOCKERS_HEAD} docs/spec.md : {reason}"
+    assert "docs/spec.md" in printed and reason in printed
     assert tree(root) == before
 
     # Nothing on the page can force past the refusal: the only control is
     # the survey again.
     assert 'value="mount"' not in page
-    assert 'value="survey"' in page
+    assert f'value="survey">{setup_web.CHECK_AGAIN_LABEL}</button>' in page
     assert 'role="status" aria-live="polite"' in page
+    # `radialrig setup` has no Projects to go back to, so no Cancel.
+    assert setup_web.CANCEL_LABEL not in text_of(page)
 
     # A client that posts the mount anyway is refused the same way.
     status, again, _ = run.post(mount_form(run))
     assert status == 200
-    assert report.refusal_head(1) in again
+    assert card_of(again)[1] == setup_web.BLOCKED_ONE
     assert tree(root) == before
     assert run.stop() == report.REFUSED
 
@@ -625,7 +722,9 @@ def test_a_conflict_shows_the_command_lines_refusal_and_writes_nothing(
 def test_a_folder_inside_a_mounted_project_is_refused_with_no_way_past(
     tmp_path, walk,
 ):
-    # Issue #65: the page refuses what the command line refuses.
+    # Issue #65: the page refuses what the command line refuses. From
+    # `radialrig setup` there is no app page to open the project in, so
+    # the card's press is Check again.
     root = _make_project(tmp_path / "monorepo")
     mnt.mount(root, scope=SCOPE)
     part = root / "apps" / "website"
@@ -634,15 +733,18 @@ def test_a_folder_inside_a_mounted_project_is_refused_with_no_way_past(
 
     run = walk(part)
     page = run.page()
-    said = text_of(page)
-    assert report.inside_mounted_head(root.resolve()) in said
-    assert report.inside_mounted_remedy(part.resolve(), root.resolve()) in said
+    head, said, details = card_of(page)
+    assert head == "Set up RadialRig in website"
+    assert said == "This folder is already part of monorepo. Nothing was written."
+    assert setup_web.INSIDE_WHY.format(folder="website") in details
+    assert f"That project is at {root.resolve()}" in details
     assert 'value="mount"' not in page
-    assert 'value="survey"' in page
+    assert f'value="survey">{setup_web.CHECK_AGAIN_LABEL}</button>' in page
+    assert "Open monorepo" not in page
 
     status, again, _ = run.post(mount_form(run))
     assert status == 200
-    assert report.inside_mounted_head(root.resolve()) in text_of(again)
+    assert card_of(again)[1] == said
     assert tree(root) == before
     assert run.stop() == report.REFUSED
 
@@ -659,12 +761,30 @@ def test_every_conflict_reason_the_engine_knows_reaches_the_page(tmp_path, walk)
 
     run = walk(root)
     page = run.page()
-    got = rows(page)
-    assert [r[1] for r in got] == [mnt.MCP_REL, mnt.AGENTS_REL, "docs/spec.md"]
-    for _, path, reason in got:
-        assert reason == report.conflict_reason(path)
-    assert report.refusal_head(3) in page
+    _, said, details = card_of(page)
+    assert said == setup_web.BLOCKED_MANY.format(count=3)
+    # `.mcp.json` takes the page's own reason, true of every way that
+    # file stops a setup (phase 2 review F6); the rest are the engine's.
+    own = {mnt.MCP_REL: setup_web.MCP_REASON}
+    assert details == setup_web.BLOCKERS_HEAD + "".join(
+        f" {path} : {own.get(path) or report.conflict_reason(path)}"
+        for path in (mnt.MCP_REL, mnt.AGENTS_REL, "docs/spec.md"))
     assert tree(root) == before
+
+    # `.mcp.json` alone has a sentence of its own, true whether the file
+    # isn't JSON or is JSON not laid out as settings.
+    for body in (b"not json at all\n", b"[1, 2]\n", b'{"mcpServers": []}\n'):
+        alone = _make_project(tmp_path / f"settings-{len(body)}")
+        (alone / mnt.MCP_REL).write_bytes(body)
+        single = walk(alone)
+        _, said, details = card_of(single.page())
+        assert said == setup_web.BLOCKED_SETTINGS.format(file=mnt.MCP_REL), body
+        assert said == (
+            "RadialRig can't add its entries to .mcp.json, because it isn't valid "
+            "JSON or isn't laid out as settings. Fix it, then check again. Nothing "
+            "was written.")
+        assert details.startswith(f"{setup_web.BLOCKERS_HEAD} {mnt.MCP_REL} : ")
+        assert single.stop() == report.REFUSED
 
 
 # --- C: already mounted ------------------------------------------------
@@ -674,25 +794,26 @@ def test_an_already_mounted_project_is_reported_and_left_alone(
 ):
     root = _make_project(tmp_path / "mounted-host")
     mnt.mount(root, scope=SCOPE)
-    # Re-pinned for PLAN-0006 Phase 3: this state is terminal when there
-    # is nothing left for the page to do, so the fixture now carries every
-    # skill this package ships. Byte for byte the state it always was.
+    # This state is terminal when there is nothing left for the page to
+    # do, so the fixture carries every skill this package ships and no
+    # client is on this machine.
     for name in sk.catalog_names():
         sk.add_all(root, name)
     before = tree(root)
 
     run = walk(root)
     page = run.page()
-    manifest = mnt.read_manifest(root)
-    said = text_of(page)
-    for line in report.already_mounted_report(root, manifest):
-        assert line in said, line
-    # The path is in the heading, set in mono rather than in the display
-    # face, and it is the whole path the command line prints.
-    assert f"<code>{str(root)}</code></h1>" in page
+    body = main_of(page)
+    # The folder's own name is the heading, its path beside it, and one
+    # sentence says there is nothing left to add from here.
+    assert (f'<div class="project-name"><h1>{root.name}</h1>'
+            f'<span class="path">{html.escape(str(root), quote=False)}</span></div>') in body
+    assert setup_web.ALREADY_COMPLETE in text_of(page)
+    assert "<form" not in body
+    assert "upgrade" not in text_of(page)
+    assert closing_of(page) == setup_web.CLOSED
     assert tree(root) == before
     assert run.wait() == report.NOOP
-    assert setup_web.STOPPED in page
 
 
 # --- D: local only, token only ----------------------------------------
@@ -914,7 +1035,8 @@ def test_an_oversized_form_body_is_refused(tmp_path, walk):
 
 
 def test_one_failed_request_does_not_end_the_walkthrough(tmp_path, walk, monkeypatch):
-    run = walk(_make_project(tmp_path / "host"))
+    root = _make_project(tmp_path / "host")
+    run = walk(root)
     assert run.page()
 
     def boom(session):
@@ -930,7 +1052,7 @@ def test_one_failed_request_does_not_end_the_walkthrough(tmp_path, walk, monkeyp
         assert status == 500
         assert "could not answer" in body
     assert run.running
-    assert setup_web.REVIEW_HEAD in run.page()
+    assert ready(root) in run.page()
 
 
 # --- PLAN-0016 phase 4: the page tells the truth about a partial press --
@@ -939,8 +1061,8 @@ def test_a_skill_fault_after_the_mount_reports_the_mount(
     tmp_path, walk, fixed_day, monkeypatch,
 ):
     # setup-web-01: the mount has landed when the skills' write fails, so
-    # the page reports the mount, names the failure, and exits partial;
-    # it does not say that nothing was written.
+    # the line says the setup stands, names the failure behind Details,
+    # and exits partial; it does not say that nothing was written.
     root = _make_project(tmp_path / "host")
     detail = "the skills directory could not be written"
 
@@ -952,10 +1074,15 @@ def test_a_skill_fault_after_the_mount_reports_the_mount(
     run.page()
     status, page, _ = run.post(mount_form(run, skill=boxes(SKILL)))
     assert status == 200
-    assert f"Mounted onto {SCOPE}." in page
-    assert setup_web.FAILED_HEAD not in page
-    assert setup_web.SKILLS_WROTE_CAPTION not in page
-    assert detail in text_of(page)
+    tone, sentence, _, details = result_of(page)
+    assert (tone, sentence) == (
+        setup_web.RESULT_PARTLY,
+        f"Set up RadialRig in {root.name}, but couldn't add the skills you ticked. "
+        "None of them was added. Check Details for what stopped them.")
+    assert detail in details
+    assert card_of(page) is None
+    assert ran_commands(page) == [f"radialrig mount {root} --scope {SCOPE}"]
+    assert closing_of(page) == setup_web.CLOSED
     assert mnt.is_mounted(root)
     assert not (root / SKILL_DIR).exists()
     assert run.wait() == report.PARTIAL
@@ -998,8 +1125,8 @@ def test_a_file_error_from_the_mount_that_was_put_back_is_a_clean_stop(
     tmp_path, walk, monkeypatch,
 ):
     # cli-connect-02, the mount half: the writer put every write back,
-    # so the page says nothing was written under the clean-stop head and
-    # exits with an error, not a partial; the 500 boundary is not reached.
+    # so the card says nothing was changed and the page exits with an
+    # error, not a partial; the 500 boundary is not reached.
     root = _make_project(tmp_path / "host")
     before = tree(root)
     real = Path.write_bytes
@@ -1014,12 +1141,13 @@ def test_a_file_error_from_the_mount_that_was_put_back_is_a_clean_stop(
     run.page()
     status, page, _ = run.post(mount_form(run))
     assert status == 200
-    assert setup_web.FAILED_HEAD in page
-    assert setup_web.PARTIAL_HEAD not in page
+    head, said, details = card_of(page)
+    assert head == f"Set up RadialRig in {root.name}"
+    assert said == setup_web.SETUP_FAILED
     assert "could not answer" not in page
-    said = text_of(page)
-    assert "Permission denied" in said and "docs/spec.md" in said
-    assert "nothing was written" in said
+    assert "Permission denied" in details and "docs/spec.md" in details
+    assert "nothing was changed" in details
+    assert closing_of(page) == setup_web.CLOSED_RETRY
     assert tree(root) == before
     assert run.wait() == report.ERROR
 
@@ -1027,8 +1155,9 @@ def test_a_file_error_from_the_mount_that_was_put_back_is_a_clean_stop(
 def test_a_file_error_from_the_mount_names_what_was_not_put_back(
     tmp_path, walk, monkeypatch,
 ):
-    # The restore of one file refused too. The page says the press
-    # stopped part way and names exactly the path the disk shows changed.
+    # The restore of one file refused too. The card says the setup
+    # stopped partway and Details names exactly the path the disk shows
+    # changed.
     root = _make_project(tmp_path / "host")
     original = b'{\n  "mcpServers": {}\n}\n'
     (root / ".mcp.json").write_bytes(original)
@@ -1047,11 +1176,11 @@ def test_a_file_error_from_the_mount_names_what_was_not_put_back(
     run.page()
     status, page, _ = run.post(mount_form(run))
     assert status == 200
-    assert setup_web.PARTIAL_HEAD in page
-    assert setup_web.FAILED_HEAD not in page
-    said = text_of(page)
-    assert "put back except: .mcp.json" in said
-    assert "nothing was written" not in said
+    _, said, details = card_of(page)
+    assert said == setup_web.SETUP_PARTIAL
+    assert "put back except: .mcp.json" in details
+    assert "nothing was written" not in details
+    assert closing_of(page) == setup_web.CLOSED
     after_files, after_dirs = tree(root)
     assert set(after_files) == set(before_files)
     assert after_dirs == before_dirs
@@ -1065,8 +1194,8 @@ def test_a_file_error_from_the_connect_after_the_mount_reports_both(
     tmp_path, walk, fixed_day, client_here, monkeypatch,
 ):
     # cli-connect-02: the mount landed and the client's settings file
-    # refused, and its restore found it as it stood. The page reports
-    # the mount, says nothing was written for the registration, and
+    # refused, and its restore found it as it stood. The line says the
+    # setup stands and the client's settings weren't changed, and the page
     # exits with an error, not a partial: nothing is left part way.
     root = _make_project(tmp_path / "host")
     client_here.write_bytes(CONFIG_HOSTS["indent2"])
@@ -1076,12 +1205,15 @@ def test_a_file_error_from_the_connect_after_the_mount_reports_both(
     assert 'name="connect"' in run.page(), "the offer is not on the review page"
     status, page, _ = run.post(mount_form(run, connect=cn.DEFAULT_CLIENT))
     assert status == 200
-    assert f"Mounted onto {SCOPE}." in page
-    assert setup_web.CONNECT_WROTE_CAPTION not in page
+    tone, sentence, warning, details = result_of(page)
+    assert (tone, sentence, warning) == (
+        setup_web.RESULT_PARTLY,
+        f"Set up RadialRig in {root.name}, but couldn't connect Claude Desktop. Its "
+        "settings weren't changed. Check Details for what stopped it.", "")
     assert "could not answer" not in page
-    said = text_of(page)
-    assert "Permission denied" in said and "nothing was written" in said
-    assert "part way" not in said
+    assert "Permission denied" in details and "nothing was changed" in details
+    assert "part way" not in details
+    assert f"radialrig connect {cn.DEFAULT_CLIENT} {root}" not in ran_commands(page)
     assert mnt.is_mounted(root)
     assert not cn.is_connected(root)
     assert client_here.read_bytes() == original
@@ -1092,8 +1224,9 @@ def test_a_file_error_from_the_connect_names_the_copy_not_put_back(
     tmp_path, walk, fixed_day, monkeypatch,
 ):
     # Two copies: the first lands, the second refuses, and the restore
-    # of the first refuses too. The page names that copy, and the disk
-    # shows it and nothing else changed.
+    # of the first refuses too. The line says connecting stopped partway,
+    # Details names that copy, and the disk shows it and nothing else
+    # changed.
     root = _make_project(tmp_path / "host")
     visible, hidden = two_copies(tmp_path, monkeypatch)
     before = {visible: visible.read_bytes(), hidden: hidden.read_bytes()}
@@ -1102,11 +1235,15 @@ def test_a_file_error_from_the_connect_names_the_copy_not_put_back(
     assert 'name="connect"' in run.page(), "the offer is not on the review page"
     status, page, _ = run.post(mount_form(run, connect=cn.DEFAULT_CLIENT))
     assert status == 200
-    assert f"Mounted onto {SCOPE}." in page
     landed = seen[0]
-    said = text_of(page)
-    assert f"put back except: {landed}" in said
-    assert "nothing was written" not in said
+    tone, sentence, _, details = result_of(page)
+    assert (tone, sentence) == (
+        setup_web.RESULT_PARTLY,
+        f"Set up RadialRig in {root.name}, but couldn't finish connecting Claude "
+        "Desktop. Some of its settings may be left changed. Check Details for the "
+        "list.")
+    assert f"put back except: {landed}" in details
+    assert "nothing was written" not in details
     changed = {path for path in before if path.read_bytes() != before[path]}
     assert changed == {landed}
     assert mnt.is_mounted(root)
@@ -1117,9 +1254,9 @@ def test_a_file_error_from_the_connect_names_the_copy_not_put_back(
 def test_a_file_error_from_a_registration_on_its_own_is_a_partial_press(
     tmp_path, walk, fixed_day, monkeypatch,
 ):
-    # On a mounted project the registration was the whole press. One
-    # copy landed and could not be put back, which is not "did not run"
-    # and not a clean error: a partial press, naming the copy.
+    # On a set-up project the connection was the whole press. One copy
+    # landed and could not be put back, which is neither "couldn't
+    # connect" nor a clean error: a partial press, naming the copy.
     root = _make_project(tmp_path / "host")
     mnt.mount(root, scope=SCOPE)
     for name in sk.catalog_names():
@@ -1128,15 +1265,17 @@ def test_a_file_error_from_a_registration_on_its_own_is_a_partial_press(
     before = {visible: visible.read_bytes(), hidden: hidden.read_bytes()}
     seen = refusing_client_writes(monkeypatch, after=1)
     run = walk(root, scope=SCOPE)
-    assert setup_web.CONNECT_LABEL in run.page()
+    assert ">Connect Claude Desktop</button>" in run.page()
     status, done, _ = run.post({"token": run.session.token, "action": "skills",
                                 "connect": cn.DEFAULT_CLIENT, **CHOSEN})
     assert status == 200
-    assert setup_web.CONNECT_DONE_HEAD not in done
-    assert setup_web.CONNECT_FAILED_HEAD not in done
-    assert setup_web.PARTIAL_HEAD in done
     landed = seen[0]
-    assert f"put back except: {landed}" in text_of(done)
+    tone, sentence, _, details = result_of(done)
+    assert (tone, sentence) == (
+        setup_web.RESULT_PARTLY,
+        "Couldn't finish connecting Claude Desktop. Some of its settings may be "
+        "left changed. Check Details for the list.")
+    assert f"put back except: {landed}" in details
     changed = {path for path in before if path.read_bytes() != before[path]}
     assert changed == {landed}
     assert not cn.is_connected(root)
@@ -1154,14 +1293,15 @@ def test_a_registration_on_its_own_that_was_put_back_did_not_run(
     original = client_here.read_bytes()
     refusing_client_writes(monkeypatch, after=0)
     run = walk(root, scope=SCOPE)
-    assert setup_web.CONNECT_LABEL in run.page()
+    assert ">Connect Claude Desktop</button>" in run.page()
     status, done, _ = run.post({"token": run.session.token, "action": "skills",
                                 "connect": cn.DEFAULT_CLIENT, **CHOSEN})
     assert status == 200
-    assert setup_web.CONNECT_FAILED_HEAD in done
-    assert setup_web.PARTIAL_HEAD not in done
-    said = text_of(done)
-    assert "Permission denied" in said and "nothing was written" in said
+    tone, sentence, _, details = result_of(done)
+    assert (tone, sentence) == (
+        setup_web.RESULT_FAILED, "Couldn't connect Claude Desktop. Nothing was changed.")
+    assert "Permission denied" in details and "nothing was changed" in details
+    assert closing_of(done) == setup_web.CLOSED_RETRY
     assert client_here.read_bytes() == original
     assert not cn.is_connected(root)
     assert run.wait() == report.ERROR
@@ -1171,9 +1311,8 @@ def test_a_skill_fault_on_the_mount_press_names_the_registration_not_attempted(
     tmp_path, walk, fixed_day, client_here, monkeypatch,
 ):
     # The mount landed, the skills' write failed, and the ticked
-    # registration is not attempted after a step that failed: the page
-    # says so, beside the fault. Without the box ticked it says nothing
-    # about a registration.
+    # connection is not attempted after a step that failed: the line says
+    # so. Without the box ticked it says nothing about a connection.
     detail = "the skills directory could not be written"
 
     def fails(plans):
@@ -1186,11 +1325,12 @@ def test_a_skill_fault_on_the_mount_press_names_the_registration_not_attempted(
     status, page, _ = run.post(
         mount_form(run, skill=boxes(SKILL), connect=cn.DEFAULT_CLIENT))
     assert status == 200
-    assert f"Mounted onto {SCOPE}." in page
-    assert setup_web.CONNECT_WROTE_CAPTION not in page
-    said = text_of(page)
-    assert detail in said
-    assert setup_web.CONNECT_NOT_ATTEMPTED in said
+    tone, sentence, _, details = result_of(page)
+    assert tone == setup_web.RESULT_PARTLY
+    assert sentence.endswith(" Claude Desktop wasn't connected.")
+    assert detail in details
+    # The engine's own sentence about it stays in the log, not on screen.
+    assert setup_web.CONNECT_NOT_ATTEMPTED not in text_of(page)
     assert mnt.is_mounted(ticked)
     assert not cn.is_connected(ticked)
     assert run.wait() == report.PARTIAL
@@ -1200,9 +1340,9 @@ def test_a_skill_fault_on_the_mount_press_names_the_registration_not_attempted(
     other.page()
     status, page, _ = other.post(mount_form(other, skill=boxes(SKILL)))
     assert status == 200
-    said = text_of(page)
-    assert detail in said
-    assert setup_web.CONNECT_NOT_ATTEMPTED not in said
+    tone, sentence, _, details = result_of(page)
+    assert detail in details
+    assert "wasn't connected" not in sentence
     assert other.wait() == report.PARTIAL
 
 
@@ -1211,8 +1351,8 @@ def test_a_file_error_while_planning_the_registration_stops_the_page(
 ):
     # cli-connect-02, the plan half: the client's file cannot be read
     # while the offer is planned. The survey and the mount press both
-    # stop with the sentence, nothing is mounted, and neither reaches
-    # the 500 boundary or drops the offer without a word.
+    # stop on the card with the sentence, nothing is set up, and neither
+    # reaches the 500 boundary or drops the offer without a word.
     client_here.write_bytes(CONFIG_HOSTS["indent2"])
     real = Path.read_bytes
     armed = [True]
@@ -1226,21 +1366,30 @@ def test_a_file_error_while_planning_the_registration_stops_the_page(
 
     surveyed = _make_project(tmp_path / "surveyed")
     run = walk(surveyed, scope=SCOPE)
+    # Issue #62: the box starts unticked. The first survey plans the
+    # connection too (phase 2 review F1), and a file error there leaves
+    # the offer as it stood: only a ticked box stops the page on it.
     status, page, _ = run.get(f"/setup?s={run.session.token}")
     assert status == 200
+    assert card_of(page) is None
+    assert 'name="connect"' in page, "the offer was dropped"
+    # Ticked, the survey plans it and meets the error.
+    status, page, _ = run.post(
+        mount_form(run, action="survey", connect=cn.DEFAULT_CLIENT))
+    assert status == 200
     assert "could not answer" not in page
-    assert setup_web.FAILED_HEAD in page
-    said = text_of(page)
-    assert "Permission denied" in said and "nothing was written" in said
+    _, said, details = card_of(page)
+    assert said == setup_web.SETUP_FAILED
+    assert "Permission denied" in details and "nothing was changed" in details
 
     pressed = _make_project(tmp_path / "pressed")
     other = walk(pressed, scope=SCOPE)
     status, page, _ = other.post(mount_form(other, connect=cn.DEFAULT_CLIENT))
     assert status == 200
     assert "could not answer" not in page
-    assert setup_web.FAILED_HEAD in page
-    said = text_of(page)
-    assert "Permission denied" in said and "nothing was written" in said
+    _, said, details = card_of(page)
+    assert said == setup_web.SETUP_FAILED
+    assert "Permission denied" in details and "nothing was changed" in details
     assert not mnt.is_mounted(pressed)
 
     armed[0] = False
@@ -1356,8 +1505,9 @@ def test_an_unreadable_mount_record_stops_the_walkthrough(tmp_path, walk):
     (root / mnt.MANIFEST_REL).write_bytes(b"{ not json\n")
     run = walk(root)
     page = run.page()
-    assert setup_web.FAILED_HEAD in page
-    assert mnt.MANIFEST_REL in page
+    _, said, details = card_of(page)
+    assert said == setup_web.SETUP_FAILED
+    assert mnt.MANIFEST_REL in details
     assert run.wait() == report.ERROR
 
 
@@ -1418,7 +1568,8 @@ def test_the_page_carries_both_marks_and_the_light_alternate(tmp_path, walk):
 
 
 def test_every_state_leads_with_a_heading(tmp_path, walk, fixed_day):
-    """Including the refusal, whose whole message is the head."""
+    """One heading per screen, the card's included: a refusal's whole
+    message is its card, headed by the setup it stopped."""
     conflicted = _make_project(tmp_path / "conflict-host")
     (conflicted / "docs").mkdir()
     (conflicted / "docs" / "spec.md").write_bytes(b"ours\n")
@@ -1431,24 +1582,27 @@ def test_every_state_leads_with_a_heading(tmp_path, walk, fixed_day):
     for name, page in pages.items():
         assert page.count("<h1") == 1, name
         assert "</h1>" in page, name
-    # The refusal head is that heading, not a paragraph under none.
     refusal = pages["conflict-host"]
-    assert '<p class="head">' not in refusal
-    assert f'<h1 class="head">{report.refusal_head(1)}</h1>' in refusal
+    assert '<section class="card" role="status" aria-live="polite">' in refusal
+    assert "<h1>Set up RadialRig in conflict-host</h1>" in refusal
+    assert "<h1>already-host</h1>" in pages["already-host"]
 
 
 def test_the_command_block_carries_its_panel_in_every_state(tmp_path, walk):
-    """The already-mounted state emits its command outside the next-step
-    list, so a rule scoped to that list leaves the block unstyled — the
-    command text and its copy button touching, with no panel."""
+    """Every command on the screen is one line with its Copy beside it,
+    under one rule that isn't scoped to a list, so a command drawn
+    anywhere on the screen gets its panel."""
     root = _make_project(tmp_path / "mounted-host")
     mnt.mount(root, scope=SCOPE)
     page = walk(root).page()
-    assert '<div class="cmd"><code>radialrig upgrade</code>' in page
+    assert shown_commands(page) == []
+    assert f'<div class="copy-line"><code>radialrig skill add {SKILL} {root} ' \
+        f"--harness {FIRST.name}</code>" in page
 
     css = (packaged_web() / "page.css").read_text(encoding="utf-8")
     assert ".steps .cmd" not in css, "the command block is styled only inside a list"
     assert re.search(r"^\.cmd \{", css, re.M), "no unscoped .cmd rule"
+    assert re.search(r"^\.screen \.copy-line \{", css, re.M), "no rule for a copy line"
 
 
 def test_the_light_alternate_keeps_its_ink_off_the_amber_anchor(tmp_path, walk):
@@ -1469,7 +1623,12 @@ def test_the_light_alternate_keeps_its_ink_off_the_amber_anchor(tmp_path, walk):
     # The endorsed first mention reflows on a narrow viewport; it is part
     # of the header treatment, so it is not dropped.
     assert ".endorse { display: none" not in css
-    assert "display: none; }" not in css.split("max-width: 34rem", 1)[-1]
+    # No narrow-viewport block hides anything. The redesigned screens'
+    # rules follow the first block now (PLAN-0027 phase 1), so each block
+    # is read on its own.
+    for width in ("34rem", "46rem"):
+        narrow = css.split(f"@media (max-width: {width}) {{", 1)[1].split("\n}", 1)[0]
+        assert "display: none" not in narrow, width
 
 
 def test_one_amber_carries_meaning_on_the_review_screen(
@@ -1528,20 +1687,22 @@ def test_a_long_path_wraps_inside_its_own_column():
     assert "Cascadia Mono" in path_rule
     # The comment above the rule no longer argues for break-word.
     assert "break-word, not anywhere" not in css
-    listing_rule = css.split(
-        "table.plan.projects td.path {", 1)[1].split("}", 1)[0]
-    assert "overflow-wrap: break-word" in listing_rule
+    # The listing that had its own `td.path` rule is a list of rows since
+    # PLAN-0027 phase 1, and its rule went with its table.
+    assert "table.plan.projects" not in css
 
 
 def test_the_page_is_readable_without_color(tmp_path, walk):
     run = walk(_make_project(tmp_path / "host"))
     page = run.page()
-    # Verbs are text, the plan is a table, and the primary control has a
-    # visible focus state (wireframe section 7).
-    assert "<caption>" in page
-    assert page.count('<th scope="col">') == 3
-    for verb, _, _ in rows(page):
-        assert verb in mnt.VERBS
+    # Each cell says its state in a word beside its mark, every box has a
+    # name a reader by ear hears, and the press has a visible focus state.
+    assert grid_boxes(page)
+    for _, name, _ in grid_boxes(page):
+        assert name.endswith((f"for {FIRST.label}", f"for {SECOND.label}")), name
+    assert page.count(f"<span>{setup_web.GLYPH_MINUS}</span>"
+                      f"{setup_web.CELL_OFF_LABEL}</span>") == len(grid_boxes(page))
+    assert page.count('<th scope="col">') == 1 + len(AGENTS)
     assert ":focus-visible" in page
     assert "outline: 2px solid var(--accent)" in page
     assert '<button class="primary" type="submit" name="action" value="mount">' in page
@@ -1627,61 +1788,64 @@ def test_the_review_state_offers_every_packaged_skill_unchecked(tmp_path, walk):
     run = walk(root, scope=SCOPE)
     review = run.page()
 
-    for harness in AGENTS:
-        for name in sk.catalog_names():
-            assert f'value="{setup_web.box_value(harness.name, name)}"' in review, name
-    assert setup_web.SKILLS_HEAD in review
-    # Unchecked to begin with: the mount is what the user came for, and a
+    # Row by row, one skill per row and one cell per agent.
+    assert [value for value, _, _ in grid_boxes(review)] == [
+        setup_web.box_value(harness.name, name)
+        for name in sk.catalog_names() for harness in AGENTS]
+    assert f"<h2>{setup_web.SKILLS_HEAD}</h2>" in review
+    # Unchecked to begin with: the setup is what the user came for, and a
     # box that arrives ticked installs something nobody asked for.
+    assert not any(checked for _, _, checked in grid_boxes(review))
     assert " checked>" not in review
-    # Nothing is checked, so there is one table and it is the mount's.
-    assert review.count("<caption>") == 1
-    assert rows(review) == FAMILY_ROWS
+    # Nothing is ticked, so every skill's line in Details is drawn hidden
+    # and the files that show are the setup's own.
+    plan = mnt.mount_plan(root, scope=SCOPE, owner=mnt.DEFAULT_OWNER)
+    assert [path for path, _, on in files_listed(review) if on] == [
+        mnt.one_line(d.path) for d in plan.dispositions()]
     assert tree(root) == before
 
 
 def test_the_boxes_stand_in_one_group_per_agent_with_a_tick_all(tmp_path, walk):
-    """PLAN-0015 phase 3 prescription 1. On a fresh project the skills
-    box holds one group per agent, in map order, headed by the agent's
-    label, with one box per packaged skill and a Tick all beside the
-    heading; the page's own script wires the control to its group and
-    nothing else, and no page constant names an agent."""
+    """PLAN-0015 phase 3 prescription 1, as the grid draws it: one row per
+    packaged skill with its line once, one column per agent in map order
+    headed by the agent's label, a tick box per cell, and Add all at the
+    head of each column, which ticks that column and nothing else and
+    ships hidden for the script to wire. No page constant names an agent."""
     root = _host(tmp_path / "host")
     run = walk(root, scope=SCOPE)
     review = run.page()
-    assert setup_web.TICK_ALL_LABEL == "Tick all"
+    assert setup_web.ADD_ALL_LABEL == "Add all"
+    assert setup_web.ADD_ALL_NAME == "Add all skills for {agent}"
 
-    found = groups(review)
-    assert [label for label, _, _ in found] == [h.label for h in AGENTS]
-    assert len(found) == 2
-    for harness, (_, tick, drawn) in zip(AGENTS, found):
-        assert tick, harness.label
-        assert [value for value, _ in drawn] == boxes(*sk.catalog_names(), agents=(harness,))
-        assert all("disabled" not in attrs for _, attrs in drawn)
-    # The groups stand inside the one skills box, after its lede.
-    box = review.split('<fieldset class="skills">', 1)[1]
-    assert box.index(setup_web.SKILLS_LEDE) < box.index('<fieldset class="skills agent">')
+    heads = re.findall(
+        r'<span class="agent-head"><span>([^<]*)</span>(<button class="link" '
+        r'type="button" data-all="([^"]*)" aria-label="([^"]*)" hidden>Add all</button>)?',
+        review)
+    assert [(label, agent, named) for label, _, agent, named in heads] == [
+        (h.label, h.name, f"Add all skills for {h.label}") for h in AGENTS]
+    names = sk.catalog_names()
+    assert [name for _, name, _ in grid_boxes(review)] == [
+        f"{name} for {h.label}" for name in names for h in AGENTS]
+    for harness in AGENTS:
+        assert review.count(f'data-agent="{harness.name}"') == len(names)
+    for name in names:
+        assert review.count(f"<strong>{name}</strong>") == 1, name
     # The control is a plain button, never a submit, so with the script
     # off it changes nothing and the form posts what the reader ticked.
-    # Each is named for its agent, so a reader by name hears two
-    # different controls, and it stands after the legend rather than in
-    # it, so the group's own name is the label alone.
-    assert setup_web.TICK_ALL_NAME == "Tick all for {label}"
-    assert re.findall(r'<button class="tick" type="button" aria-label="([^"]*)">Tick all'
-                      r'</button>', review) == [f"Tick all for {h.label}" for h in AGENTS]
-    for label, _, _ in AGENT_GROUP.findall(review):
-        assert "Tick all" not in label
     script = review.split("<script", 1)[1]
-    assert 'querySelectorAll("button.tick")' in script
-    assert 'button.closest("fieldset")' in script
-    assert 'group.querySelectorAll("input[type=checkbox]:not(:disabled)")' in script
+    assert 'querySelectorAll("button[data-all]")' in script
+    assert 'boxes[b].getAttribute("data-agent") === agent' in script
     # Nothing on the page says "harness"; the labels come from the map.
-    assert "harness" not in text_of(review).lower()
+    said = text_of(re.sub(r'<div class="copy-line">.*?</div>', "", review, flags=re.S))
+    assert "harness" not in said.lower()
     for harness in AGENTS:
-        assert harness.label in text_of(review)
+        assert harness.label in said
 
 
 def test_a_checked_box_shows_a_second_table_and_writes_nothing(tmp_path, walk):
+    """A ticked box and Refresh: the box comes back ticked, Details shows
+    the skill's folder and its agent's record, and the command that adds
+    it, and nothing is written."""
     root = _host(tmp_path / "host")
     before = tree(root)
     run = walk(root, scope=SCOPE)
@@ -1690,19 +1854,21 @@ def test_a_checked_box_shows_a_second_table_and_writes_nothing(tmp_path, walk):
         {"token": run.session.token, "action": "survey", "skill": boxes(SKILL), **CHOSEN},
     )
     assert status == 200
-    assert page.count("<caption>") == 2
-    assert setup_web.SKILLS_PLAN_CAPTION in page
     assert page.count(" checked>") == len(AGENTS), "a box did not survive the refresh"
-
-    planned = [d for r in sk.add_all_plan(root, SKILL) for d in r.dispositions]
-    assert rows(page)[-len(planned):] == expected_rows(planned)
+    shown = [path for path, _, on in files_listed(page) if on]
+    for harness in AGENTS:
+        assert f"{harness.skills}/{SKILL}/" in shown
+        assert harness.record in shown
+    assert shown_commands(page)[1:] == [
+        f"radialrig skill add {SKILL} {root} --harness {harness.name}"
+        for harness in AGENTS]
     assert tree(root) == before
 
 
 def test_two_boxes_for_one_agent_write_one_record_naming_both(tmp_path, walk, fixed_day):
     """The record threads through a press's names for one agent, as it
-    does on the command line: two boxes ticked in one group leave one
-    record naming both, and the plan table says the record once."""
+    does on the command line: two boxes ticked for one agent leave one
+    record naming both, and Details lists the record once."""
     root = _make_project(tmp_path / "host")
     twin = _make_project(tmp_path / "twin")
     first_two = sk.catalog_names()[:2]
@@ -1712,10 +1878,11 @@ def test_two_boxes_for_one_agent_write_one_record_naming_both(tmp_path, walk, fi
         "token": run.session.token, "action": "survey",
         "skill": boxes(*first_two, agents=(SECOND,)), **CHOSEN})
     assert status == 200
-    drawn = rows(page)
-    record_rows = [r for r in drawn if r[1] == SECOND.record]
-    assert len(record_rows) == 1, drawn
-    assert len({path for _, path, _ in drawn}) == len(drawn), "a path is drawn twice"
+    drawn = files_listed(page)
+    assert [path for path, _, _ in drawn].count(SECOND.record) == 1, drawn
+    assert len({path for path, _, _ in drawn}) == len(drawn), "a path is drawn twice"
+    assert (SECOND.record, "", True) in drawn
+    assert (FIRST.record, "", False) in drawn
 
     status, mounted, _ = run.post(mount_form(run, skill=boxes(*first_two, agents=(SECOND,))))
     assert status == 200
@@ -1742,7 +1909,7 @@ def test_a_walkthrough_with_a_box_checked_matches_the_engine_byte_for_byte(
     assert status == 200
     assert run.wait() == report.OK
 
-    mnt.mount(twin, scope=SCOPE, owner=mnt.DEFAULT_OWNER)
+    setup = mnt.mount(twin, scope=SCOPE, owner=mnt.DEFAULT_OWNER)
     written = [d for r in sk.add_all(twin, SKILL) for d in r.dispositions]
 
     page_files, page_dirs = tree(page_root)
@@ -1753,16 +1920,22 @@ def test_a_walkthrough_with_a_box_checked_matches_the_engine_byte_for_byte(
     assert page_dirs == twin_dirs
     assert snapshot(page_root) == snapshot(twin)
 
-    # Two tables, and the second says exactly what the engine wrote.
-    assert setup_web.SKILLS_WROTE_CAPTION in mounted
-    assert rows(mounted)[-len(written):] == expected_rows(written)
-    assert "radialrig skill list" in mounted
+    # The line counts the skill once, whichever agents it went in for,
+    # and its Details lists exactly what the engine wrote.
+    assert result_of(mounted)[:2] == (
+        setup_web.RESULT_DONE,
+        f"Set up RadialRig in {page_root.name} and added 1 skill. Start a new agent "
+        "session to pick it up.")
+    assert changed_of(mounted) == expected_changed(setup.dispositions(), written)
     # And one command line per pair the press wrote for, the command
-    # line's own form narrowed to the agent (prescription 2).
-    assert setup_web.SKILLS_RAN_HEAD in mounted
-    for harness in AGENTS:
-        assert f'data-copy="radialrig skill add {SKILL} {page_root} --harness {harness.name}"' \
-            in mounted
+    # line's own form narrowed to the agent (PLAN-0015 phase 3), after the
+    # setup's own, behind the Show commands box the line carries.
+    assert ran_commands(mounted) == [
+        f"radialrig mount {page_root} --scope {SCOPE}",
+        *(f"radialrig skill add {SKILL} {page_root} --harness {harness.name}"
+          for harness in AGENTS)]
+    details = mounted.split('<div class="result', 1)[1].split("</details>", 1)[0]
+    assert details.count('class="show-commands"') == 1
 
 
 def test_a_posted_name_the_catalog_does_not_know_is_dropped(tmp_path, walk):
@@ -1781,7 +1954,8 @@ def test_a_posted_name_the_catalog_does_not_know_is_dropped(tmp_path, walk):
     ])
     assert status == 200
     assert run.session.skills == ()
-    assert setup_web.SKILLS_PLAN_CAPTION not in page
+    assert " checked>" not in page
+    assert shown_commands(page) == [f"radialrig mount {root} --scope {SCOPE}"]
     assert tree(root) == before
 
     # And a good pair beside a bad one keeps only the good one, whichever
@@ -1810,26 +1984,28 @@ def test_an_edited_skill_is_offered_disabled_and_is_never_overwritten(
     run = walk(root, scope=SCOPE)
     page = run.page()
 
-    # Disabled in the one agent's group whose copy was edited; the other
-    # agent's box for the same skill is open, because that agent lacks it.
-    assert f'value="{setup_web.box_value(FIRST.name, SKILL)}" disabled>' in page
-    assert f'value="{setup_web.box_value(SECOND.name, SKILL)}">' in page
-    assert mnt.REASONS[mnt.SKILL_EDITED] in page
+    # The one agent whose copy was edited has the skill, so its cell reads
+    # On and is no box; the other agent's cell is a box, because that
+    # agent lacks it.
+    values = [value for value, _, _ in grid_boxes(page)]
+    assert setup_web.box_value(FIRST.name, SKILL) not in values
+    assert setup_web.box_value(SECOND.name, SKILL) in values
+    assert '<span class="face on has">' in page
     assert " checked>" not in page
 
-    # A client that posts the disabled box anyway is not obeyed past the
-    # edit: the mount runs, the skill is left, and the page says so.
+    # A client that posts the missing box anyway is not obeyed past the
+    # edit: the setup runs, the edited copy is left, the line says so, and
+    # it names the one pair it wrote for and none for the copy it left.
     status, mounted, _ = run.post(mount_form(run, skill=boxes(SKILL)))
     assert status == 200
     assert (root / SKILL_DIR / "SKILL.md").read_bytes() == b"# ours now\n"
-    assert mnt.REASONS[mnt.SKILL_EDITED] in mounted
     assert (root / SECOND.skills / SKILL / "SKILL.md").is_file()
-    # The finished page's command lines are the pairs the press wrote
-    # for: one for the second agent, none for the copy it left alone.
-    lines = [html.unescape(text) for text in re.findall(r'data-copy="([^"]*)"', mounted)
-             if "skill add" in text]
-    assert lines == [setup_web.skill_add_line(SECOND.name, SKILL, root)]
-    assert f"--harness {FIRST.name}" not in mounted
+    tone, sentence, _, _ = result_of(mounted)
+    assert tone == setup_web.RESULT_PARTLY
+    assert sentence.endswith(setup_web.KEPT_EDITED)
+    assert setup_web.KEPT_EDITED == "Left a skill copy you edited as it was."
+    assert [line for line in ran_commands(mounted) if "skill add" in line] == [
+        setup_web.skill_add_line(SECOND.name, SKILL, root)]
     assert run.wait() == report.PARTIAL
 
 
@@ -1841,17 +2017,20 @@ def test_a_foreign_skill_directory_refuses_with_no_force_affordance(tmp_path, wa
 
     run = walk(root, scope=SCOPE)
     page = run.page()
-    assert f'value="{setup_web.box_value(FIRST.name, SKILL)}" disabled>' in page
-    assert mnt.REASONS[mnt.SKILL_DIR_FOREIGN] in page
+    assert setup_web.box_value(FIRST.name, SKILL) not in [v for v, _, _ in grid_boxes(page)]
+    assert (f'<span class="cell-note">'
+            f'{html.escape(setup_web.CELL_REASONS[setup_web.CELL_FOREIGN], quote=False)}'
+            "</span>") in page
 
+    # Posted anyway, the press meets the engine's refusal: one sentence,
+    # what stands there behind Details, and Check again.
     status, refused, _ = run.post(mount_form(run, skill=boxes(SKILL)))
     assert status == 200
-    assert report.refusal_head(1) in refused
-    assert report.SKILL_FOREIGN_TAIL in refused
-    # The refusal carries the survey and nothing else. There is no page
-    # affordance to force past it, because the command line has none.
+    _, said, details = card_of(refused)
+    assert said == setup_web.SKILL_BLOCKED
+    assert SKILL_DIR in details
     assert 'value="mount"' not in refused
-    assert 'value="survey"' in refused
+    assert f'value="survey">{setup_web.CHECK_AGAIN_LABEL}</button>' in refused
     assert tree(root) == before, "the refusal wrote something"
     assert run.stop() == report.REFUSED
 
@@ -1864,31 +2043,31 @@ def test_a_mounted_project_can_still_add_a_skill(tmp_path, walk, fixed_day):
 
     run = walk(root, scope=SCOPE)
     page = run.page()
-    # Not terminal any more: there is one thing left the page can do.
-    assert setup_web.STOPPED not in page
-    assert 'value="skills"' in page
-    assert setup_web.SKILLS_LABEL in page
+    # Not terminal any more: there is something left the page can add.
+    assert setup_web.ALREADY_OFFERS in text_of(page)
+    assert closing_of(page) == ""
+    assert ('<button class="primary" type="submit" name="action" value="skills">'
+            f"{setup_web.ADD_LABEL}</button>") in page
     assert run.running
 
     status, done, _ = run.post(
         {"token": run.session.token, "action": "skills", "skill": boxes(SKILL), **CHOSEN},
     )
     assert status == 200
-    assert setup_web.SKILLS_DONE_HEAD in done
+    assert result_of(done)[:2] == (
+        setup_web.RESULT_DONE, "Added 1 skill. Start a new agent session to pick it up.")
+    assert closing_of(done) == setup_web.STOPPED
     assert run.wait() == report.OK
 
     written = [d for r in sk.add_all(twin, SKILL) for d in r.dispositions]
-    assert rows(done) == expected_rows(written)
+    assert changed_of(done) == expected_changed(written)
     assert snapshot(root) == snapshot(twin)
-    assert setup_web.SKILLS_RAN_HEAD in done
-    for harness in AGENTS:
-        assert f'data-copy="radialrig skill add {SKILL} {root} --harness {harness.name}"' in done
-    # The finished page's next step, like every other sentence on it,
-    # says "agent", never "harness"; the flag keeps its name in the
-    # command lines alone.
-    assert report.SKILL_NEXT_STEP in text_of(done)
+    assert ran_commands(done) == [
+        f"radialrig skill add {SKILL} {root} --harness {harness.name}" for harness in AGENTS]
+    # The finished line, like every other sentence on the page, says
+    # "agent", never "harness"; the flag keeps its name in the commands.
     assert "harness" not in text_of(
-        re.sub(r'<div class="cmd">.*?</div>', "", done, flags=re.S)).lower()
+        re.sub(r'<div class="copy-line">.*?</div>', "", done, flags=re.S)).lower()
 
 
 def test_ticking_all_in_one_group_installs_for_that_agent_alone(
@@ -1896,13 +2075,13 @@ def test_ticking_all_in_one_group_installs_for_that_agent_alone(
 ):
     """PLAN-0015 phase 3's done-condition, on `radialrig setup`.
 
-    A fresh project shows two groups of every packaged skill with a Tick
-    all beside each heading. Every box in the second agent's group ticked
+    A fresh project shows a column of every packaged skill per agent with
+    Add all at each head. Every box in the second agent's column ticked
     and the one press pressed: every skill is installed for that agent
-    and none for the first, the finished page prints one `--harness`
-    line per pair, and `skill list` shows every skill installed under
-    the second agent's directory and absent under the first's. The tree
-    is byte for byte what the command line's whole-catalog add leaves.
+    and none for the first, the line names one `--harness` command per
+    pair, and `skill list` shows every skill installed under the second
+    agent's directory and absent under the first's. The tree is byte for
+    byte what the command line's whole-catalog add leaves.
     """
     root = _host(tmp_path / "host")
     twin = _host(tmp_path / "twin")
@@ -1910,31 +2089,32 @@ def test_ticking_all_in_one_group_installs_for_that_agent_alone(
     assert len(names) == 5
     run = walk(root, scope=SCOPE)
     review = run.page()
-    assert [(label, tick, len(drawn)) for label, tick, drawn in groups(review)] == [
-        (FIRST.label, True, 5), (SECOND.label, True, 5)]
+    assert len(grid_boxes(review)) == 2 * len(names)
 
     ticked = boxes(*names, agents=(SECOND,))
     status, mounted, _ = run.post(mount_form(run, skill=ticked))
     assert status == 200
-    assert f"Mounted onto {SCOPE}." in mounted
+    assert result_of(mounted)[:2] == (
+        setup_web.RESULT_DONE,
+        f"Set up RadialRig in {root.name} and added 5 skills. Start a new agent "
+        "session to pick them up.")
     assert run.wait() == report.OK
 
-    mnt.mount(twin, scope=SCOPE, owner=mnt.DEFAULT_OWNER)
+    setup = mnt.mount(twin, scope=SCOPE, owner=mnt.DEFAULT_OWNER)
     written = list(dict.fromkeys(
         d for r in sk.add_catalog(twin, targets=(SECOND.name,)) for d in r.dispositions))
     assert snapshot(root) == snapshot(twin)
-    assert rows(mounted)[-len(written):] == expected_rows(written)
+    assert changed_of(mounted) == expected_changed(setup.dispositions(), written)
 
-    # Four lines, one per pair, each the command line's own form narrowed
+    # Five lines, one per pair, each the command line's own form narrowed
     # to the second agent, and none naming the first.
-    lines = [html.unescape(text) for text in re.findall(r'data-copy="([^"]*)"', mounted)
-             if "skill add" in text]
+    lines = [line for line in ran_commands(mounted) if "skill add" in line]
     assert lines == [f"radialrig skill add {name} {root} --harness {SECOND.name}"
                      for name in names]
     assert lines == [setup_web.skill_add_line(SECOND.name, name, root) for name in names]
     assert f"--harness {FIRST.name}" not in mounted
     assert "harness" not in text_of(
-        re.sub(r'<div class="cmd">.*?</div>', "", mounted, flags=re.S)).lower()
+        re.sub(r'<div class="copy-line">.*?</div>', "", mounted, flags=re.S)).lower()
 
     # On disk and in `skill list`: installed for the second agent, absent
     # for the first.
@@ -1958,35 +2138,38 @@ def test_ticking_all_in_one_group_installs_for_that_agent_alone(
 def test_a_group_whose_agent_has_every_skill_says_so_and_offers_no_boxes(
     tmp_path, walk, fixed_day, client_here,
 ):
-    """Prescription 3. One agent complete: its group is one sentence with
-    no boxes and no Tick all, the other's has every box. Both complete:
-    the one sentence the page has always said, and no groups."""
+    """Prescription 3 from `radialrig setup`. One agent complete: its
+    column reads On in every cell, with no box and no Add all, and the
+    other's has every box. Both complete and not connected: the screen
+    offers the connection alone, Claude Desktop's row with Connect."""
     root = _make_project(tmp_path / "host")
     mnt.mount(root, scope=SCOPE)
     sk.add_catalog(root, targets=(FIRST.name,))
-    assert setup_web.SKILLS_AGENT_NONE == "{label} already has every skill this package ships."
+    names = sk.catalog_names()
 
     run = walk(root, scope=SCOPE)
     page = run.page()
-    found = groups(page)
-    assert [(label, tick, len(drawn)) for label, tick, drawn in found] == [
-        (FIRST.label, False, 0), (SECOND.label, True, len(sk.catalog_names()))]
-    said = text_of(page)
-    assert setup_web.SKILLS_AGENT_NONE.format(label=FIRST.label) in said
-    assert setup_web.SKILLS_AGENT_NONE.format(label=SECOND.label) not in said
-    assert setup_web.SKILLS_NONE not in said
-    assert setup_web.SKILLS_LABEL in page
+    assert [value for value, _, _ in grid_boxes(page)] == boxes(*names, agents=(SECOND,))
+    assert page.count('<span class="face on has">') == len(names)
+    assert f'data-all="{FIRST.name}"' not in page
+    assert f'data-all="{SECOND.name}"' in page
+    assert setup_web.ALREADY_OFFERS in text_of(page)
+    assert f">{setup_web.ADD_LABEL}</button>" in page
+    assert 'name="connect"' in page
     assert run.stop() == report.NOOP
 
     sk.add_catalog(root, targets=(SECOND.name,))
-    # Still not terminal: the client on this machine is unregistered, so
-    # the skills box is drawn, and it says the one sentence.
+    # Still not terminal: the client on this machine isn't connected, so
+    # its row is the screen's one press.
     again = walk(root, scope=SCOPE)
     page = again.page()
-    assert groups(page) == []
-    assert page.count(setup_web.SKILLS_NONE) == 1
-    assert '<button class="tick"' not in page
-    assert setup_web.CONNECT_LABEL in page
+    assert grid_boxes(page) == []
+    assert page.count('<span class="face on has">') == 2 * len(names)
+    assert "data-all=" not in page
+    assert f">{setup_web.ADD_LABEL}</button>" not in page
+    assert ('<button class="primary" type="submit" name="action" value="skills">'
+            "Connect Claude Desktop</button>") in page
+    assert f"<span>{setup_web.NOT_CONNECTED}</span>" in page
     assert again.stop() == report.NOOP
 
 
@@ -2102,54 +2285,73 @@ def test_the_page_offers_connect_when_a_client_is_detected(
 
     client = cn.client_for(cn.DEFAULT_CLIENT)
     key = cn.entry_key(client, SCOPE)
-    # The legend and hint are the wireframe's words, with the client's
-    # name arriving from the client table rather than a page constant.
-    assert setup_web.connect_head(client) == "Connect Claude Desktop"
-    assert setup_web.connect_lede(client) == (
-        "RadialRig adds one entry to Claude Desktop's own settings and "
-        "changes nothing else there."
-    )
-    assert setup_web.connect_head(client) in review
-    assert setup_web.connect_lede(client) in review
-    assert f'name="connect" value="{client.name}" checked>' in review
-    # The caption carries no count, like the mount and skills captions.
-    assert f"<caption>{setup_web.CONNECT_PLAN_CAPTION}</caption>" in review
-    assert review.count("<caption>") == 2, "the connect plan has no table"
-    assert tree(root) == before, "the review state wrote something"
+    write_key = cn.write_entry_key(client, SCOPE)
+    # The box and its hint are the owner's words, with the client's name
+    # arriving from the client table rather than a page constant (issue
+    # #62): the hint says every session the client opens gets both.
+    assert ('<label class="check"><input type="checkbox" name="connect" '
+            f'value="{client.name}" data-shows="connect:{client.name}">'
+            "Connect Claude Desktop</label>") in review
+    assert ('<p class="hint">Adds a rule lookup and a rule editor to every Claude '
+            "Desktop session: chat, the Code tab, and local Cowork.</p>") in review
+    # Unticked to begin with, so what follows it in Details is drawn
+    # hidden: the two entries it adds, by name, and the files they go in.
+    assert f'name="connect" value="{client.name}" data-shows="connect:{client.name}" checked' \
+        not in review
+    said = html.unescape(review)
+    assert setup_web.CLIENT_KEYS.format(key=key, write_key=write_key) in said
+    assert f'<div data-for="connect:{client.name}" hidden><h3>' in review
+    assert (cn.CONNECT_REL, "", False) in files_listed(review)
+    assert tree(root) == before, "the ready screen wrote something"
+
+    # Ticked and refreshed, the box stays ticked and what follows it shows.
+    status, ticked, _ = run.post(
+        mount_form(run, action="survey", connect=client.name))
+    assert status == 200
+    assert f'data-shows="connect:{client.name}" checked>' in ticked
+    assert f'<div data-for="connect:{client.name}"><h3>' in ticked
+    assert (cn.CONNECT_REL, "", True) in files_listed(ticked)
+    assert shown_commands(ticked)[-1] == f"radialrig connect {client.name} {root}"
+    assert tree(root) == before, "the refreshed ready screen wrote something"
 
     status, mounted, _ = run.post(mount_form(run, connect=client.name))
     assert status == 200
     assert run.wait() == report.OK
-
-    assert setup_web.CONNECT_WROTE_CAPTION in mounted
-    # The restart sentence is the page's last line, and it comes out of
-    # the client table rather than out of a page constant.
-    assert text_of(mounted).endswith(client.restart)
+    # The line says it connected and what to do next, in the client
+    # table's name for it.
+    assert result_of(mounted)[:3] == (
+        setup_web.RESULT_DONE,
+        f"Set up RadialRig in {root.name} and connected Claude Desktop. Fully quit "
+        "and reopen Claude Desktop to use the connection.", "")
+    assert ran_commands(mounted)[-1] == f"radialrig connect {client.name} {root}"
     assert cn.is_connected(root)
-    entry = json.loads(client_here.read_text(encoding="utf-8"))["mcpServers"][key]
+    servers = json.loads(client_here.read_text(encoding="utf-8"))["mcpServers"]
+    entry = servers[key]
     assert entry["env"][cn.ROOT_ENV] == str(root)
     assert entry["args"] == []
+    # The second key Details named is the entry the press wrote beside it.
+    assert sorted(servers) == sorted([key, write_key])
 
 
 def test_the_page_offers_no_connect_when_no_client_is_detected(
     tmp_path, walk, fixed_day,
 ):
-    """No client on this machine is not a page failure: the mount still
-    runs, and the offer simply is not made."""
+    """No client on this machine is not a page failure: the setup still
+    runs, and the offer simply is not made, with no word about it."""
     root = _host(tmp_path / "host")
     run = walk(root, scope=SCOPE)
     review = run.page()
     client = cn.client_for(cn.DEFAULT_CLIENT)
 
-    assert setup_web.connect_head(client) not in review
     assert 'name="connect"' not in review
     assert client.label not in review
-    assert review.count("<caption>") == 1
+    assert '<div class="offer">' not in review
 
     status, mounted, _ = run.post(mount_form(run))
     assert status == 200
-    assert f"Mounted onto {SCOPE}." in mounted
-    assert client.restart not in mounted
+    assert result_of(mounted)[:2] == (
+        setup_web.RESULT_DONE, f"Set up RadialRig in {root.name}.")
+    assert client.label not in mounted
     assert run.wait() == report.OK
     assert not cn.is_connected(root)
 
@@ -2158,9 +2360,9 @@ def test_an_unreadable_client_profile_reads_as_no_client(
     tmp_path, walk, fixed_day, client_here, monkeypatch,
 ):
     """`is_dir` raises on a profile directory that denies traversal, and
-    the offer asks `detect` before the review and again before the press.
-    The walkthrough reads as it does on a machine with no client: no
-    offer, and the mount still lands."""
+    the offer asks `detect` before the ready screen and again before the
+    press. The screen reads as it does on a machine with no client: no
+    offer, and the setup still lands."""
     client = cn.client_for(cn.DEFAULT_CLIENT)
     assert cn.detect(client), "readable, the client is found"
 
@@ -2172,14 +2374,15 @@ def test_an_unreadable_client_profile_reads_as_no_client(
     run = walk(root, scope=SCOPE)
     review = run.page()
 
-    assert setup_web.MOUNT_LABEL in review
-    assert setup_web.connect_head(client) not in review
+    assert f">{setup_web.SETUP_LABEL}</button>" in review
     assert 'name="connect"' not in review
+    assert client.label not in review
 
     status, mounted, _ = run.post(mount_form(run, connect=client.name))
     assert status == 200
-    assert f"Mounted onto {SCOPE}." in mounted
-    assert client.restart not in mounted
+    assert result_of(mounted)[:2] == (
+        setup_web.RESULT_DONE, f"Set up RadialRig in {root.name}.")
+    assert client.label not in mounted
     assert run.wait() == report.OK
     assert not cn.is_connected(root)
 
@@ -2190,42 +2393,58 @@ def test_the_page_and_the_command_line_report_the_same_connect_rows(
     root = _make_project(tmp_path / "host")
     twin = _make_project(tmp_path / "twin")
     run = walk(root, scope=SCOPE)
-    review = run.page()
+    run.page()
+    # The box starts unticked (issue #62); ticked, Details lists the
+    # files the connection's plan writes: its record in the folder, and
+    # each settings file the client keeps.
+    status, review, _ = run.post(
+        mount_form(run, action="survey", connect=cn.DEFAULT_CLIENT))
+    assert status == 200
 
     plan = cn.connect_plan(root, scope=SCOPE)
-    assert rows(review)[-len(plan.dispositions):] == expected_rows(plan.dispositions)
+    for d in plan.dispositions:
+        if d.path == cn.CONNECT_REL:
+            assert (cn.CONNECT_REL, "", True) in files_listed(review)
+        else:
+            assert f"<li><code>{html.escape(str(Path(d.path)), quote=False)}</code></li>" \
+                in review, d.path
 
     status, mounted, _ = run.post(mount_form(run, connect=cn.DEFAULT_CLIENT))
     assert status == 200
     run.wait()
 
     # The same engine call on a twin with its own client directory, so
-    # the two runs do not compete for one entry key.
+    # the two runs do not compete for one entry key: the line lists what
+    # it wrote with the tag its verb takes.
     other = tmp_path / "other" / "Roaming"
     (other / "Claude").mkdir(parents=True)
     mnt.mount(twin, scope=SCOPE, owner=mnt.DEFAULT_OWNER)
     theirs = cn.connect(twin, scope=SCOPE, env={"APPDATA": str(other)})
-    assert [(r[0], r[2]) for r in rows(mounted)[-len(theirs.dispositions):]] == [
-        (d.verb,
-         mnt.reason_text(d) or setup_web.WROTE_REASONS.get(d.code, ""))
-        for d in theirs.dispositions
-    ]
+    connected = [(path, tag) for path, tag in changed_of(mounted)
+                 if path == cn.CONNECT_REL or path.endswith("claude_desktop_config.json")]
+    assert [tag for _, tag in connected] == [
+        setup_web.TAGS[d.verb] for d in theirs.dispositions if d.verb in setup_web.TAGS]
 
 
 def test_a_connect_refusal_withdraws_the_offer_and_keeps_the_mount(
     tmp_path, walk, fixed_day, client_here,
 ):
-    """A taken entry key is not a reason to withhold the mount button.
+    """A taken entry key is not a reason to withhold Set up project.
 
-    The connect is an offer, never a precondition: the offer is withdrawn,
-    the page says why in the engine's own words, and the press the reader
-    came for is still there. A press therefore carries no refused connect.
+    The connection is an offer, never a precondition: the offer is
+    withdrawn, one sentence says why in the screen's words, and the press
+    the reader came for is still there. A press therefore carries no
+    refused connection.
+
+    The screen plans the connection when it is drawn, ticked or not,
+    through the same read-only plan the press runs, so a taken name
+    replaces the box before any press (phase 2 review F1). The sentence
+    says to change Project name and press Refresh, and that brings the
+    box back.
     """
     root = _make_project(tmp_path / "host")
     client = cn.client_for(cn.DEFAULT_CLIENT)
     key = cn.entry_key(client, SCOPE)
-    conflicts = (mnt.Disposition(
-        client_here.as_posix(), mnt.LEFT, mnt.CONNECT_KEY_HOST_OWNED),)
     client_here.write_bytes(
         (json.dumps({"mcpServers": {key: {"command": "theirs"}}}, indent=2)
          + "\n").encode("utf-8")
@@ -2233,27 +2452,47 @@ def test_a_connect_refusal_withdraws_the_offer_and_keeps_the_mount(
     taken = client_here.read_bytes()
 
     run = walk(root, scope=SCOPE)
-    page = run.page()
-    assert 'value="mount"' in page, "a refused registration took the mount with it"
+    first = run.page()
+    assert 'value="mount"' in first, "a refused connection took the setup with it"
+    assert 'name="connect"' not in first, "the box is offered under a taken name"
+    assert setup_web.CONNECT_NAME_TAKEN.format(label=client.label) in text_of(first)
+    assert (f"{setup_web.CONNECT_BLOCKERS_HEAD.format(label=client.label)} "
+            f"{client_here.as_posix()}: ") in html.unescape(text_of(first))
+    assert client_here.read_bytes() == taken, "drawing the screen wrote to the client"
+    # A post that still carries the box, from a screen drawn before the
+    # name was taken, meets the same plan and the same sentence.
+    status, page, _ = run.post(
+        mount_form(run, action="survey", connect=cn.DEFAULT_CLIENT))
+    assert status == 200
+    assert 'value="mount"' in page, "a refused connection took the setup with it"
     assert 'name="connect"' not in page, "the refused offer is still on the table"
-    assert setup_web.connect_head(client) not in page
-    assert report.connect_withheld_notice(client.name, root, conflicts) in text_of(page)
+    assert setup_web.CONNECT_NAME_TAKEN.format(label=client.label) in text_of(page)
+    # What the sentence says to do: another name, then Refresh. The box
+    # is back, unticked, and the client's file is as it was.
+    status, renamed, _ = run.post(
+        mount_form(run, action="survey", scope=f"{SCOPE}-two"))
+    assert status == 200
+    assert re.search(r'<input type="checkbox" name="connect" value="'
+                     + cn.DEFAULT_CLIENT + r'" data-shows="[^"]*">', renamed), (
+        "the box did not come back under a free name")
+    assert setup_web.CONNECT_NAME_TAKEN.format(label=client.label) not in text_of(renamed)
+    assert client_here.read_bytes() == taken
 
     status, mounted, _ = run.post(mount_form(run))
     assert status == 200
-    assert f"Mounted onto {SCOPE}." in mounted
+    assert result_of(mounted)[:2] == (
+        setup_web.RESULT_DONE, f"Set up RadialRig in {root.name}.")
     assert run.wait() == report.OK
-    assert client_here.read_bytes() == taken, "the mount touched the client's file"
+    assert client_here.read_bytes() == taken, "the setup touched the client's file"
     assert not cn.is_connected(root)
-    assert setup_web.CONNECT_WROTE_CAPTION not in mounted
 
 
 def test_a_press_that_still_carries_a_refused_connect_writes_nothing(
     tmp_path, walk, fixed_day, client_here,
 ):
-    """The offer is withdrawn on the page, so only a press from a page
-    rendered before the key was taken can carry it. That press is refused
-    whole: a mount plus a refused registration would be half a press."""
+    """The offer is withdrawn on the screen, so only a press from a screen
+    drawn before the key was taken can carry it. That press is refused
+    whole: a setup plus a refused connection would be half a press."""
     root = _make_project(tmp_path / "host")
     key = cn.entry_key(cn.client_for(cn.DEFAULT_CLIENT), SCOPE)
     before = tree(root)
@@ -2268,9 +2507,11 @@ def test_a_press_that_still_carries_a_refused_connect_writes_nothing(
 
     status, again, _ = run.post(mount_form(run, connect=cn.DEFAULT_CLIENT))
     assert status == 200
-    assert report.connect_refusal_head(1) in again
+    _, said, details = card_of(again)
+    assert said == setup_web.CONNECT_REFUSED.format(label="Claude Desktop")
+    assert client_here.as_posix() in details
     assert 'value="mount"' not in again
-    assert tree(root) == before, "the refusal mounted something"
+    assert tree(root) == before, "the refusal set something up"
     assert client_here.read_bytes() == taken
     assert run.stop() == report.REFUSED
 
@@ -2278,8 +2519,9 @@ def test_a_press_that_still_carries_a_refused_connect_writes_nothing(
 def test_a_mounted_project_can_still_register_on_its_own(
     tmp_path, walk, fixed_day, client_here,
 ):
-    """The already-mounted page is not terminal while a client on this
-    machine is unregistered, and the one press does only the connect."""
+    """PLAN-0027 phase 2's done-condition, from `radialrig setup`: a set-up
+    project with every skill and no connection is offered Connect, as
+    today, and the one press does only the connection."""
     root = _make_project(tmp_path / "host")
     mnt.mount(root, scope=SCOPE)
     for name in sk.catalog_names():
@@ -2287,31 +2529,39 @@ def test_a_mounted_project_can_still_register_on_its_own(
 
     run = walk(root, scope=SCOPE)
     page = run.page()
-    assert setup_web.STOPPED not in page
-    assert setup_web.CONNECT_LABEL in page
+    assert setup_web.ALREADY_OFFERS in text_of(page)
+    assert ('<button class="primary" type="submit" name="action" value="skills">'
+            "Connect Claude Desktop</button>") in page
+    assert '<input type="hidden" name="connect" value="claude-desktop">' in page
+    # The command it runs is shown with its switch, whatever the boxes.
+    assert shown_commands(page) == [f"radialrig connect {cn.DEFAULT_CLIENT} {root}"]
     assert run.running
 
-    status, done, _ = run.post({"token": run.session.token, "action": "skills",
-                                "connect": cn.DEFAULT_CLIENT, **CHOSEN})
+    status, done, _ = run.post({**hidden_fields(page), "action": "skills"})
     assert status == 200
-    assert setup_web.CONNECT_DONE_HEAD in done
+    assert result_of(done)[:3] == (
+        setup_web.RESULT_DONE,
+        "Connected Claude Desktop. Fully quit and reopen Claude Desktop to use the "
+        "connection.", "")
+    assert ran_commands(done) == [f"radialrig connect {cn.DEFAULT_CLIENT} {root}"]
     assert run.wait() == report.OK
     assert cn.is_connected(root)
 
-    # And once it is registered the offer is gone: the page says nothing
-    # about a step there is no longer anything to do.
+    # And once it is connected the offer is gone: the page says there is
+    # nothing left to add from here.
     second = walk(root, scope=SCOPE)
     after = second.page()
-    assert setup_web.connect_head(cn.client_for(cn.DEFAULT_CLIENT)) not in after
+    assert setup_web.ALREADY_COMPLETE in text_of(after)
+    assert "Connect Claude Desktop" not in after
     assert second.wait() == report.NOOP
 
 
 def test_a_failed_registration_never_claims_the_project_is_registered(
     tmp_path, walk, fixed_day, client_here, monkeypatch,
 ):
-    """The registration was the whole press, and it failed after the
-    offer. The page says that, in the engine's own sentence, and claims
-    nothing it cannot show."""
+    """The connection was the whole press, and it failed after the
+    offer. The line says so, the engine's sentence is behind Details, and
+    it claims nothing it cannot show."""
     root = _make_project(tmp_path / "host")
     mnt.mount(root, scope=SCOPE)
     for name in sk.catalog_names():
@@ -2319,7 +2569,7 @@ def test_a_failed_registration_never_claims_the_project_is_registered(
     detail = "the settings file could not be opened"
 
     run = walk(root, scope=SCOPE)
-    assert setup_web.CONNECT_LABEL in run.page()
+    assert ">Connect Claude Desktop</button>" in run.page()
 
     def fails(*args, **kwargs):
         raise cn.ConnectError(detail)
@@ -2328,10 +2578,11 @@ def test_a_failed_registration_never_claims_the_project_is_registered(
     status, done, _ = run.post({"token": run.session.token, "action": "skills",
                                 "connect": cn.DEFAULT_CLIENT, **CHOSEN})
     assert status == 200
-    assert setup_web.CONNECT_DONE_HEAD not in done
-    assert setup_web.CONNECT_FAILED_HEAD in done
-    assert detail in text_of(done)
-    assert cn.client_for(cn.DEFAULT_CLIENT).restart not in done
+    tone, sentence, _, details = result_of(done)
+    assert (tone, sentence) == (
+        setup_web.RESULT_FAILED, "Couldn't connect Claude Desktop. Nothing was changed.")
+    assert detail in details
+    assert ran_commands(done) == []
     assert run.wait() == report.ERROR
     assert not cn.is_connected(root)
     assert not client_here.exists()
@@ -2340,15 +2591,21 @@ def test_a_failed_registration_never_claims_the_project_is_registered(
 def test_an_unticked_connect_box_writes_no_entry(tmp_path, walk, fixed_day, client_here):
     root = _make_project(tmp_path / "host")
     run = walk(root, scope=SCOPE)
-    run.page()
-    # The box is ticked by default; a post without it is a reader who
-    # cleared it, and nothing registers.
-    status, mounted, _ = run.post(mount_form(run))
+    review = run.page()
+    # Issue #62: the box starts unticked, so the page's own form, posted
+    # as drawn with only its hidden fields, carries no connect value and
+    # nothing connects.
+    assert re.search(r'name="connect"[^>]*>', review), "no offer drawn"
+    assert not re.search(r'name="connect"[^>]*checked', review), "the box starts ticked"
+    status, mounted, _ = run.post({**hidden_fields(review), "action": "mount"})
     assert status == 200
     assert run.wait() == report.OK
     assert not cn.is_connected(root)
     assert not client_here.exists()
-    assert setup_web.CONNECT_WROTE_CAPTION not in mounted
+    assert result_of(mounted)[:2] == (
+        setup_web.RESULT_DONE, f"Set up RadialRig in {root.name}.")
+    assert not [line for line in ran_commands(mounted)
+                if line.startswith("radialrig connect")]
 
 
 # --- H: the terminal it prints ----------------------------------------
@@ -2397,40 +2654,41 @@ def test_a_refusal_and_a_check_again_keep_every_tick_and_the_connect_box(
 ):
     """setup-web-03: the boxes a reader ticked survive a refusal.
 
-    The refusal's form carries no box and no marker, so the survey it
-    posts says nothing about the boxes, and what the reader ticked before
-    the mount was refused is what the review shows after Check again.
+    The card's form carries no box and no marker, so the survey it posts
+    says nothing about the boxes, and what the reader ticked before the
+    setup was refused is what the screen shows after Check again.
     """
     root = _make_project(tmp_path / "host")
     run = walk(root, scope=SCOPE)
     review = run.page()
     assert 'name="connect"' in review, "no offer to keep"
     ticked = boxes(SKILL, agents=(SECOND,))
-    # The rulebook appears after the review was drawn, so the press is
+    # The rulebook appears after the screen was drawn, so the press is
     # what meets it.
     (root / "docs").mkdir()
     (root / "docs" / "spec.md").write_bytes(b"this project's own rulebook\n")
 
-    # The press carries what the review form carries, plus the ticks.
+    # The press carries what the ready form carries, plus the ticks.
     status, refused, _ = run.post({
         **hidden_fields(review), "action": "mount", "scope": SCOPE,
         "owner": mnt.DEFAULT_OWNER, "skill": ticked, "connect": cn.DEFAULT_CLIENT,
     })
     assert status == 200
-    assert report.refusal_head(1) in refused
+    assert card_of(refused)[1] == setup_web.BLOCKED_ONE
     assert run.session.skills == ((SECOND.name, SKILL),)
     assert run.session.connect is True
-    # The refusal's form carries no box: nothing on it can untick one.
+    # The card's form carries no box: nothing on it can untick one.
     assert 'name="skill"' not in refused
     assert 'name="connect"' not in refused
+    assert f'name="{setup_web.CHOICES_FIELD}"' not in refused
 
     (root / "docs" / "spec.md").unlink()
     status, again, _ = run.post({**hidden_fields(refused), "action": "survey"})
     assert status == 200
-    assert setup_web.REVIEW_HEAD in again
+    assert ready(root) in again
     assert run.session.skills == ((SECOND.name, SKILL),)
     assert run.session.connect is True
-    checked = [value for value, attrs in BOX.findall(again) if "checked" in attrs]
+    checked = [value for value, _, on in grid_boxes(again) if on]
     assert checked == ticked
     assert re.search(r'name="connect"[^>]*checked', again), "the connect box was cleared"
     assert run.running
@@ -2442,13 +2700,18 @@ def test_a_slot_no_quoting_rule_makes_safe_offers_no_copy_line(tmp_path, walk):
     The finished page still says what it did; it offers no line a reader
     could paste that would run something they did not type.
     """
-    state = setup_web.PageState(
-        kind=setup_web.MOUNTED, outcome=report.OK, terminal=True,
-        added=((SECOND.name, SKILL),))
     for ch in UNSAFE:
         for slot in (rf"C:\dev\proj{ch}x", f"radialrig-foo{ch}calc"):
             session = setup_web.Session(Path(slot), SCOPE, mnt.DEFAULT_OWNER)
-            assert setup_web._skill_lines(session, state) == "", repr(slot)
+            session.skills = ((SECOND.name, SKILL),)
+            for kind in (setup_web.MOUNTED, setup_web.SKILLED):
+                state = setup_web.PageState(
+                    kind=kind, outcome=report.OK, terminal=True,
+                    added=((SECOND.name, SKILL),))
+                assert setup_web.ran_commands(session, state) == (), repr(slot)
+            review = setup_web.PageState(
+                kind=setup_web.REVIEW, outcome=report.NOOP, terminal=False)
+            assert setup_web.press_commands(session, review, ()) == (), repr(slot)
             with pytest.raises(setup_web.Unquotable):
                 setup_web.quoted(slot)
 
@@ -2457,13 +2720,17 @@ def test_a_slot_no_quoting_rule_makes_safe_offers_no_copy_line(tmp_path, walk):
     root = _make_project(tmp_path / "proj&calc")
     run = walk(root, scope=SCOPE)
     review = run.page()
+    assert shown_commands(review) == []
     status, mounted, _ = run.post({
         **hidden_fields(review), "action": "mount", "scope": SCOPE,
         "owner": mnt.DEFAULT_OWNER, "skill": boxes(SKILL, agents=(SECOND,)),
     })
     assert status == 200
-    assert f"Mounted onto {SCOPE}." in mounted
-    assert setup_web.SKILLS_WROTE_CAPTION in mounted, "the page stopped saying what it did"
+    assert result_of(mounted)[:2] == (
+        setup_web.RESULT_DONE,
+        f"Set up RadialRig in {root.name} and added 1 skill. Start a new agent "
+        "session to pick it up."), "the page stopped saying what it did"
+    assert changed_of(mounted), "the page stopped listing what it changed"
     copied = [html.unescape(text) for text in re.findall(r'data-copy="([^"]*)"', mounted)]
     assert copied, "the slot-free lines went with it"
     for line in copied:
@@ -2490,12 +2757,12 @@ def test_a_slot_outside_the_bare_set_is_double_quoted():
 def test_a_reload_of_the_review_page_leaves_the_server_standing_and_the_next_mount_lands(
     tmp_path, walk, fixed_day,
 ):
-    """setup-web-05: F5 on the review page is not the page closing.
+    """setup-web-05: F5 on the ready screen is not the page closing.
 
     The browser serves the reload's GET first and fires the old
     document's close after it, so the close carries the id of a document
     this session has already replaced, and the server drops it. The
-    reader then presses Mount on the reloaded page and it lands.
+    reader then presses Set up project on the reloaded page and it lands.
     """
     root = _make_project(tmp_path / "host")
     run = walk(root, scope=SCOPE)
@@ -2512,7 +2779,7 @@ def test_a_reload_of_the_review_page_leaves_the_server_standing_and_the_next_mou
 
     status, mounted, _ = run.post(mount_form(run))
     assert status == 200
-    assert f"Mounted onto {SCOPE}." in mounted
+    assert result_of(mounted)[0] == setup_web.RESULT_DONE
     assert run.wait() == report.OK
     assert mnt.is_mounted(root)
 
@@ -2521,9 +2788,9 @@ def test_a_reload_of_the_review_page_leaves_the_server_standing_and_the_next_mou
 
 def test_a_utf16_skills_record_stops_the_page_in_words(tmp_path, walk):
     # skills-roster-04, the page half: the record in another encoding is
-    # the same sentence `skill list` prints, under the clean-stop head,
-    # on the survey and on the mount press alike; the 500 boundary is
-    # not reached and nothing is written.
+    # the same sentence `skill list` prints, behind the card that says
+    # setup stopped and nothing was changed, on the survey and on the
+    # press alike; the 500 boundary is not reached and nothing is written.
     record_rel = sk.default_harness().record
 
     def host(name: str) -> Path:
@@ -2539,8 +2806,9 @@ def test_a_utf16_skills_record_stops_the_page_in_words(tmp_path, walk):
     status, page, _ = run.get(f"/setup?s={run.session.token}")
     assert status == 200
     assert "could not answer" not in page
-    assert setup_web.FAILED_HEAD in page
-    assert f"{record_rel} does not parse as JSON" in text_of(page)
+    _, said, details = card_of(page)
+    assert said == setup_web.SETUP_FAILED
+    assert f"{record_rel} does not parse as JSON" in details
     assert tree(surveyed) == before
 
     pressed = host("pressed")
@@ -2549,8 +2817,9 @@ def test_a_utf16_skills_record_stops_the_page_in_words(tmp_path, walk):
     status, page, _ = other.post(mount_form(other, skill=boxes(SKILL)))
     assert status == 200
     assert "could not answer" not in page
-    assert setup_web.FAILED_HEAD in page
-    assert f"{record_rel} does not parse as JSON" in text_of(page)
+    _, said, details = card_of(page)
+    assert said == setup_web.SETUP_FAILED
+    assert f"{record_rel} does not parse as JSON" in details
     assert not mnt.is_mounted(pressed)
     assert tree(pressed) == before
 
@@ -2610,9 +2879,10 @@ def test_a_registration_that_cannot_be_planned_is_reported_by_both_presses(
     tmp_path, walk, fixed_day, client_here, monkeypatch,
 ):
     """tests-06: the offer was on the page and could not be planned at
-    press time. The mount press and the skills press both land what they
-    can and both carry the engine's sentence, so the two surfaces agree
-    and the registration the page offered does not vanish unsaid."""
+    press time. The setup press and a set-up project's press both land
+    what they can and both carry the engine's sentence, so the two
+    surfaces agree and the connection the page offered does not vanish
+    unsaid."""
     detail = "the settings file could not be opened"
     armed = [False]
     real = cn.connect_plan
@@ -2624,8 +2894,8 @@ def test_a_registration_that_cannot_be_planned_is_reported_by_both_presses(
 
     monkeypatch.setattr(cn, "connect_plan", refuse)
 
-    # The mount press: the mount lands, the registration does not run,
-    # and the page says why in the engine's own words.
+    # The setup press: the setup lands, the connection does not run, and
+    # the line says so with the engine's own words behind Details.
     pressed = _make_project(tmp_path / "pressed")
     run = walk(pressed, scope=SCOPE)
     assert 'name="connect"' in run.page(), "the offer is not on the review page"
@@ -2633,28 +2903,404 @@ def test_a_registration_that_cannot_be_planned_is_reported_by_both_presses(
     status, page, _ = run.post(mount_form(run, connect=cn.DEFAULT_CLIENT))
     armed[0] = False
     assert status == 200
-    assert f"Mounted onto {SCOPE}." in page
+    tone, sentence, _, details = result_of(page)
+    assert (tone, sentence) == (
+        setup_web.RESULT_PARTLY,
+        f"Set up RadialRig in {pressed.name}, but couldn't connect Claude Desktop. "
+        "Its settings weren't changed. Check Details for what stopped it.")
+    assert detail in details
     assert mnt.is_mounted(pressed)
     assert not cn.is_connected(pressed)
-    assert setup_web.CONNECT_WROTE_CAPTION not in page
-    assert detail in text_of(page)
     assert run.wait() == report.OK
 
-    # The skills press on a project already mounted: the same sentence,
-    # under the head that says the registration did not run.
+    # The press on a project already set up: the same sentence, under the
+    # line that says the connection didn't run.
     mounted = _make_project(tmp_path / "mounted")
     mnt.mount(mounted, scope=SCOPE)
     for name in sk.catalog_names():
         sk.add_all(mounted, name)
     other = walk(mounted, scope=SCOPE)
-    assert setup_web.CONNECT_LABEL in other.page()
+    assert ">Connect Claude Desktop</button>" in other.page()
     armed[0] = True
     status, done, _ = other.post({"token": other.session.token, "action": "skills",
                                   "connect": cn.DEFAULT_CLIENT, **CHOSEN})
     armed[0] = False
     assert status == 200
-    assert setup_web.CONNECT_DONE_HEAD not in done
-    assert setup_web.CONNECT_FAILED_HEAD in done
-    assert detail in text_of(done)
+    tone, sentence, _, details = result_of(done)
+    assert (tone, sentence) == (
+        setup_web.RESULT_FAILED, "Couldn't connect Claude Desktop. Nothing was changed.")
+    assert detail in details
     assert not cn.is_connected(mounted)
     assert other.wait() == report.ERROR
+
+
+# --- BUG-0018: an open client can undo the connect -----------------------
+
+def test_an_open_client_is_named_on_the_review_and_the_done_page(
+    tmp_path, walk, fixed_day, client_here,
+):
+    """BUG-0018 on `radialrig setup`: the before-press sentence under the
+    Connect box while the client is open, and the after-press sentence on
+    the line of a setup that connected while it was. This page has no
+    Repair, so its sentence says where one is."""
+    from radialrig.tests.test_connect import plant_lock
+
+    client = cn.client_for(cn.DEFAULT_CLIENT)
+    plant_lock(client_here)
+    root = _host(tmp_path / "host")
+    run = walk(root, scope=SCOPE)
+    review = run.page()
+    assert (f'<p class="warn">{report.client_running_before(client)}</p>'
+            in review.split('<div class="offer">', 1)[1].split("</div>", 1)[0])
+    assert report.client_running_before(client) == (
+        "Claude Desktop is running. Fully quit it first, or it may undo this change.")
+
+    status, mounted, _ = run.post(mount_form(run, connect=client.name))
+    assert status == 200
+    assert run.wait() == report.OK, "a warning, not a refusal"
+    assert cn.is_connected(root)
+    tone, _, warning, _ = result_of(mounted)
+    assert tone == setup_web.RESULT_DONE
+    assert warning == (
+        "Claude Desktop is running and may undo this change. Fully quit it and "
+        "reopen it; if the connection is gone, open this project in RadialRig and "
+        "press Repair.")
+    assert warning == setup_web.RUNNING_AFTER_SETUP.format(label=client.label)
+
+
+def test_a_setup_that_left_the_client_alone_says_nothing_about_it_running(
+    tmp_path, walk, fixed_day, client_here,
+):
+    """The after-press sentence is for a press that connected: a setup
+    with the box unticked leaves the client's settings alone, so its line
+    carries no warning even while the client is open."""
+    from radialrig.tests.test_connect import plant_lock
+
+    plant_lock(client_here)
+    root = _make_project(tmp_path / "host")
+    run = walk(root, scope=SCOPE)
+    run.page()
+    status, mounted, _ = run.post(mount_form(run))
+    assert status == 200
+    assert result_of(mounted)[:3] == (
+        setup_web.RESULT_DONE, f"Set up RadialRig in {root.name}.", "")
+    assert run.wait() == report.OK
+
+
+def test_a_setup_with_skills_and_the_connection_ticked_answers_in_one_line(
+    tmp_path, walk, fixed_day, client_here,
+):
+    """Prescription 3 from `radialrig setup`: the result shows on the same
+    screen, as one line saying all three landed, with every command the
+    press ran behind Details, and the word that the server has stopped."""
+    root = _make_project(tmp_path / "pit-strategy")
+    run = walk(root, scope=SCOPE)
+    run.page()
+    status, done, _ = run.post(mount_form(
+        run, skill=boxes(*sk.catalog_names()), connect=cn.DEFAULT_CLIENT))
+    assert status == 200
+    assert result_of(done)[:3] == (
+        setup_web.RESULT_DONE,
+        f"Set up RadialRig in {root.name}, added {len(sk.catalog_names())} skills, "
+        "and connected Claude Desktop. Start a new agent session for the skills, and "
+        "fully quit and reopen Claude Desktop to use the connection.", "")
+    assert ran_commands(done) == [
+        f"radialrig mount {root} --scope {SCOPE}",
+        *(setup_web.skill_add_line(harness.name, name, root)
+          for harness in AGENTS for name in sk.catalog_names()),
+        f"radialrig connect {cn.DEFAULT_CLIENT} {root}"]
+    assert closing_of(done) == setup_web.STOPPED
+    assert '<div class="screen setup done">' in done
+    assert run.wait() == report.OK
+    assert cn.is_connected(root)
+
+
+# --- PLAN-0027 phase 2, review round 1 -----------------------------------
+# One test per finding the review raised and the triage kept. F1's is
+# `test_a_connect_refusal_withdraws_the_offer_and_keeps_the_mount` above.
+
+def _take_the_name(config: Path, scope: str) -> bytes:
+    """Another server's entry under the key this project's name gives."""
+    key = cn.entry_key(cn.client_for(cn.DEFAULT_CLIENT), scope)
+    config.write_bytes(
+        (json.dumps({"mcpServers": {key: {"command": "theirs"}}}, indent=2)
+         + "\n").encode("utf-8"))
+    return config.read_bytes()
+
+
+def test_a_set_up_project_whose_name_is_taken_is_told_what_its_screen_holds(
+    tmp_path, walk, fixed_day, client_here,
+):
+    """Review F3. A set-up folder's screen has no Project name and no
+    Refresh, so the sentence in the Connect box's place sends no one to
+    them. It sends the reader to Details for what's in the way, and
+    Details is there, with skills left to add and without."""
+    client = cn.client_for(cn.DEFAULT_CLIENT)
+    owed = getattr(setup_web, "CONNECT_NAME_TAKEN_SET_UP", None)
+    blockers = f"{setup_web.CONNECT_BLOCKERS_HEAD.format(label=client.label)} "
+
+    # Skills left to add. The reviewer's way in: Connect posted with Add
+    # to this project, refused on the card, then Check again.
+    root = _make_project(tmp_path / "missing-skills")
+    mnt.mount(root, scope=SCOPE)
+    taken = _take_the_name(client_here, SCOPE)
+    run = walk(root, scope=SCOPE)
+    run.page()
+    status, refused, _ = run.post({"token": run.session.token, "action": "skills",
+                                   "skill": boxes(SKILL), "connect": cn.DEFAULT_CLIENT,
+                                   **CHOSEN})
+    assert status == 200
+    assert card_of(refused)[1] == setup_web.CONNECT_REFUSED.format(label=client.label)
+    status, again, _ = run.post({"token": run.session.token, "action": "survey"})
+    assert status == 200
+    said = text_of(again)
+    assert 'id="scope"' not in again and 'value="survey"' not in again
+    assert "Project name" not in said and "Refresh" not in said, (
+        "the sentence names controls this screen doesn't have")
+    assert owed is not None and owed.format(label=client.label) in said
+    assert blockers + client_here.as_posix() in html.unescape(said)
+    assert 'value="skills"' in again, "the skills it can still add went with the box"
+    run.stop()
+
+    # Every skill there already: nothing to add, and Details still holds
+    # what's in the way. The screen as first drawn says it (review F1);
+    # before that fix, a post carrying the box brought it about.
+    full = _make_project(tmp_path / "every-skill")
+    mnt.mount(full, scope=SCOPE)
+    for name in sk.catalog_names():
+        sk.add_all(full, name)
+    other = walk(full, scope=SCOPE)
+    page = other.page()
+    said = text_of(page)
+    assert "Project name" not in said and "Refresh" not in said
+    assert '<details class="settings">' in main_of(page), (
+        "the sentence sends the reader to Details and there is none")
+    assert blockers + client_here.as_posix() in html.unescape(said)
+    assert client_here.read_bytes() == taken
+
+
+def test_a_set_up_project_with_nothing_it_can_add_stops_its_server(
+    tmp_path, walk, fixed_day,
+):
+    """Review F4. A regular file stands where each agent's skills folder
+    would go, and no client is on this computer: the screen offers no
+    press, so it says the closing line and the server stops, as the other
+    finished screens do."""
+    root = _make_project(tmp_path / "host")
+    mnt.mount(root, scope=SCOPE)
+    for harness in sk.HARNESSES.values():
+        blocked = root / harness.skills
+        blocked.parent.mkdir(parents=True, exist_ok=True)
+        blocked.write_bytes(b"not a folder\n")
+    before = tree(root)
+    run = walk(root, scope=SCOPE)
+    page = run.page()
+    assert grid_boxes(page) == [] and 'value="skills"' not in page
+    assert setup_web.ALREADY_COMPLETE in text_of(page)
+    assert closing_of(page) == setup_web.CLOSED, (
+        "nothing can be added and the page doesn't say its server stopped")
+    assert run.wait() == report.NOOP
+    assert tree(root) == before
+
+
+def test_a_connection_that_stopped_partway_while_the_client_runs_carries_the_warning(
+    tmp_path, walk, fixed_day, monkeypatch,
+):
+    """Review F2. The before-and-after rule covers every press that writes
+    the client's settings. A connection that stopped partway and left one
+    of the client's settings files changed, while the client looks open,
+    carries the after-press sentence. One that left only the project's
+    own record changed left the client's settings as they were, and says
+    nothing about it."""
+    from radialrig.tests.test_connect import plant_lock
+
+    client = cn.client_for(cn.DEFAULT_CLIENT)
+    real_write = Path.write_bytes
+    visible, hidden = two_copies(tmp_path, monkeypatch)
+    plant_lock(visible)
+    plant_lock(hidden)
+    before = {visible: visible.read_bytes(), hidden: hidden.read_bytes()}
+    seen = refusing_client_writes(monkeypatch, after=1)
+    root = _make_project(tmp_path / "host")
+    run = walk(root, scope=SCOPE)
+    run.page()
+    status, page, _ = run.post(mount_form(run, connect=cn.DEFAULT_CLIENT))
+    assert status == 200
+    assert {p for p in before if p.read_bytes() != before[p]} == {seen[0]}
+    tone, sentence, warning, _ = result_of(page)
+    assert (tone, sentence) == (
+        setup_web.RESULT_PARTLY,
+        f"Set up RadialRig in {root.name}, but couldn't finish connecting Claude "
+        "Desktop. Some of its settings may be left changed. Check Details for the "
+        "list.")
+    assert warning == setup_web.RUNNING_AFTER_SETUP.format(label=client.label), (
+        "the client's settings were left changed while it runs, with no warning")
+    assert run.wait() == report.PARTIAL
+    monkeypatch.setattr(Path, "write_bytes", real_write)
+
+    # The project's own record left, the client's settings put back.
+    visible, hidden = two_copies(tmp_path / "record-only", monkeypatch)
+    plant_lock(visible)
+    record_only = _make_project(tmp_path / "record-only" / "host")
+    record = cn.record_path(record_only)
+
+    def stopped_at_the_record(*args, **kwargs):
+        raise cn.WriteStopped(record, "Permission denied", (record,))
+
+    monkeypatch.setattr(cn, "connect", stopped_at_the_record)
+    other = walk(record_only, scope=SCOPE)
+    other.page()
+    status, page, _ = other.post(mount_form(other, connect=cn.DEFAULT_CLIENT))
+    assert status == 200
+    assert result_of(page)[0] == setup_web.RESULT_PARTLY
+    assert result_of(page)[2] == "", "a warning for a change the client's settings never had"
+    assert other.wait() == report.PARTIAL
+
+
+def test_the_stopped_card_sets_the_file_as_code_and_breaks_its_path_after_separators(
+    tmp_path, walk,
+):
+    """PLAN-0027 phase 5, C2 and C3. Mockup 04-add-conflict sets
+    `.mcp.json` as code in the card's sentence. The folder's path is drawn
+    in pieces that each end at a separator, with a break offered after
+    each, so a name such as lap-notes never wraps into "lap-" and "notes";
+    the pieces read back as the path, whole."""
+    root = _make_project(tmp_path / "lap-notes")
+    (root / mnt.MCP_REL).write_bytes(b"not json at all\n")
+    card = main_of(walk(root).page()).split('<section class="card"', 1)[1]
+    assert ("<p>RadialRig can't add its entries to <code>.mcp.json</code>, "
+            "because it isn't valid JSON") in card
+
+    drawn = re.search(r'<p class="path">(.*?)</p>', card).group(1)
+    pieces = re.findall(r'<span class="seg">([^<]*)</span>', drawn)
+    assert "".join(html.unescape(piece) for piece in pieces) == str(root)
+    assert pieces[-1] == "lap-notes"
+    assert all(piece.endswith(("\\", "/")) for piece in pieces[:-1])
+    assert drawn == "<wbr>".join(f'<span class="seg">{piece}</span>' for piece in pieces)
+    css = (packaged_web() / "page.css").read_text(encoding="utf-8").replace("\r\n", "\n")
+    assert (".screen .card .path .seg { display: inline-block; max-width: 100%; "
+            "overflow-wrap: anywhere; }") in css
+
+
+def test_add_a_project_sets_its_folder_under_the_heading_and_its_note_to_a_reading_width():
+    """PLAN-0027 phase 5, C1 and C4: mockup 04-add-project puts the folder
+    on a line of its own under the heading, and holds the Connect note to
+    a reading width."""
+    css = (packaged_web() / "page.css").read_text(encoding="utf-8").replace("\r\n", "\n")
+    assert (".screen.setup .project-name { flex-direction: column; "
+            "align-items: flex-start; gap: 2px; }") in css
+    assert ".screen .offer .hint { margin-left: 24px; max-width: 62ch;" in css
+
+
+def test_a_mcp_json_laid_out_wrong_gets_a_true_reason_in_details(tmp_path, walk):
+    """Review F6. `{"mcpServers": []}` is valid JSON whose servers are not
+    laid out as settings. The card's sentence already allows for that;
+    Details gives the file the page's own reason, true of every way the
+    file can stop a setup. The command line's reason stays its own."""
+    cli_reason = report.conflict_reason(mnt.MCP_REL)
+    root = _make_project(tmp_path / "host")
+    (root / mnt.MCP_REL).write_bytes(b'{"mcpServers": []}\n')
+    run = walk(root, scope=SCOPE)
+    page = run.page()
+    _, said, details = card_of(page)
+    assert said == setup_web.BLOCKED_SETTINGS.format(file=mnt.MCP_REL)
+    assert "does not parse as a JSON object" not in details, (
+        "Details says a file that parses does not parse")
+    reason = getattr(setup_web, "MCP_REASON", None)
+    assert reason and reason in details
+    assert cli_reason == (
+        f"this project's {mnt.MCP_REL} does not parse as a JSON object")
+
+
+def _refuse_once(monkeypatch, inside: Path, *, at: int) -> list[tuple[str, Path]]:
+    """The write numbered `at` (from 1) to a file under `inside` refuses,
+    once; every other write lands, the restores included. Returns each
+    such write in order, marked as it went."""
+    real = Path.write_bytes
+    seen: list[tuple[str, Path]] = []
+
+    def once(self, data):
+        if inside in self.parents:
+            if len(seen) + 1 == at and not any(m == "refused" for m, _ in seen):
+                seen.append(("refused", self))
+                raise PermissionError(13, "Permission denied", str(self))
+            seen.append(("wrote", self))
+        return real(self, data)
+
+    monkeypatch.setattr(Path, "write_bytes", once)
+    return seen
+
+
+# Review F7. A stop whose writer put back every file it wrote left
+# nothing changed, and the line says so; but a file was written and
+# removed, so neither the line nor its Details says nothing was written.
+# The same for the setup, for its skills, and for its connection.
+
+def test_a_setup_that_put_back_what_it_wrote_never_says_nothing_was_written(
+    tmp_path, walk, fixed_day, monkeypatch,
+):
+    """The setup's first file lands, its second refuses, and the first is
+    taken out again."""
+    root = _make_project(tmp_path / "host")
+    before = tree(root)
+    seen = _refuse_once(monkeypatch, root, at=2)
+    run = walk(root, scope=SCOPE)
+    run.page()
+    status, page, _ = run.post(mount_form(run))
+    assert status == 200
+    assert [mark for mark, _ in seen[:2]] == ["wrote", "refused"]
+    assert tree(root) == before
+    _, said, details = card_of(page)
+    assert said == setup_web.SETUP_FAILED
+    assert "Permission denied" in details
+    assert "nothing was written" not in text_of(page).lower(), (
+        "a file was written and removed, and the card says nothing was written")
+    assert "nothing was changed" in details
+    assert run.wait() == report.ERROR
+
+
+def test_skills_that_were_put_back_never_say_nothing_was_written(
+    tmp_path, walk, fixed_day, monkeypatch,
+):
+    """After the setup landed, the first skill file lands, the second
+    refuses, and the first is taken out again."""
+    skilled = _make_project(tmp_path / "skilled")
+    seen = _refuse_once(monkeypatch, skilled / SKILL_DIR, at=2)
+    run = walk(skilled, scope=SCOPE)
+    run.page()
+    status, page, _ = run.post(mount_form(run, skill=boxes(SKILL, agents=(FIRST,))))
+    assert status == 200
+    assert [mark for mark, _ in seen[:2]] == ["wrote", "refused"]
+    assert not [p for p in (skilled / SKILL_DIR).rglob("*") if p.is_file()]
+    _, sentence, _, details = result_of(page)
+    assert sentence == setup_web.SET_UP_NO_SKILLS.format(project=skilled.name)
+    assert "Permission denied" in details
+    assert "nothing was written" not in details.lower(), (
+        "a skill file was written and removed, and Details says nothing was written")
+    assert run.wait() == report.PARTIAL
+
+
+def test_a_connection_that_was_put_back_never_says_nothing_was_written(
+    tmp_path, walk, fixed_day, monkeypatch,
+):
+    """After the setup landed, the first of the client's two settings
+    files lands, the second refuses, and the first is put back as it
+    was."""
+    visible, hidden = two_copies(tmp_path / "two", monkeypatch)
+    pristine = {visible: visible.read_bytes(), hidden: hidden.read_bytes()}
+    seen = _refuse_once(monkeypatch, tmp_path / "two", at=2)
+    connected = _make_project(tmp_path / "connected")
+    run = walk(connected, scope=SCOPE)
+    run.page()
+    status, page, _ = run.post(mount_form(run, connect=cn.DEFAULT_CLIENT))
+    assert status == 200
+    assert [mark for mark, _ in seen[:2]] == ["wrote", "refused"]
+    assert {p for p in pristine if p.read_bytes() != pristine[p]} == set()
+    _, sentence, _, details = result_of(page)
+    assert sentence == setup_web.SET_UP_NO_CONNECT.format(
+        project=connected.name, label="Claude Desktop")
+    assert "Permission denied" in details
+    assert "nothing was written" not in details.lower(), (
+        "a settings file was written and put back, and Details says nothing was written")
+    assert not cn.is_connected(connected)
+    assert run.wait() == report.ERROR

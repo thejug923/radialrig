@@ -69,11 +69,12 @@ pub const PATH_REPORT_ON: &str = "path_report_on";
 pub const PATH_REPORT_OFF: &str = "path_report_off";
 
 /// The engine swap's own sentences (PLAN-0021 phase 2, prescription 4):
-/// the progress line while it replaces the engine, which is not one of
-/// the nine steps and so draws no count, and the one sentence a swap that
-/// gave up adds under its stop. The first of those two names, in its
-/// slot, the programs that still hold the engine; the second says none
-/// was found running from the engine's folders.
+/// the progress line while it replaces the engine, which the install
+/// screen draws as the heading and sentence of its Working card, under
+/// the Installing step (PLAN-0027 phase 4), and the one sentence a swap
+/// that gave up adds under its stop. The first of those two names, in
+/// its slot, the programs that still hold the engine; the second says
+/// none was found running from the engine's folders.
 pub const SWAP_RUNNING: &str = "swap_running";
 pub const SWAP_HELD: &str = "swap_held";
 pub const SWAP_HELD_NONE: &str = "swap_held_none";

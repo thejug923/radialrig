@@ -559,7 +559,7 @@ def test_nothing_changes_when_the_log_folder_is_unwritable(
     run_.page()
     status, body, _ = run_.post({"token": run_.session.token, "action": "mount"})
     assert status == 200
-    assert "Mounted onto host." in html.unescape(body)
+    assert "Set up RadialRig in host." in html.unescape(body)
     assert mnt.is_mounted(pressed)
     assert run_.wait() == report.OK
 
@@ -728,7 +728,9 @@ def test_the_failure_wording_and_the_removal_list_name_the_log(tmp_path, monkeyp
     assert line in html.unescape(setup_web._failed_body(session, partial))
     connect_failed = setup_web.PageState(
         setup_web.CONNECT_FAILED, report.ERROR, True, message="no client")
-    assert line in html.unescape(setup_web._connect_failed_body(session, connect_failed))
+    # A connection that didn't run answers with its result line, the log
+    # behind its Details (PLAN-0027 phase 2).
+    assert line in html.unescape(setup_web._added_body(session, connect_failed))
 
     act = manage_web.Action(
         name=manage_web.UNMOUNT, root=str(tmp_path / "host"),
@@ -745,19 +747,20 @@ def test_the_failure_wording_and_the_removal_list_name_the_log(tmp_path, monkeyp
     assert line not in html.unescape(manage_web._action_body(msession, done))
     assert line not in html.unescape(manage_web._step_report(done))
 
-    remains = html.unescape(manage_web._remains())
-    assert manage_web.REMAINS_LOG.format(
-        path=path, older=path.with_name(al.OLDER_NAME)) in remains
-    assert manage_web.REMAINS_ROSTER.format(path=ro.roster_path()) in remains
+    # Remove RadialRig's What stays afterward names the folder the project
+    # list and the activity logs stay in (PLAN-0027 phase 3).
+    stays = html.unescape(manage_web._stays(()))
+    assert path.parent == ro.roster_path().parent
+    assert manage_web.STAYS_SAID.format(data_dir=path.parent) in stays
 
     # No folder for it: the sentences say nothing about a log.
     clear_store_env(monkeypatch)
     assert setup_web.worded(setup_web.INTERNAL) == plain
     head = setup_web.LOG_LINE.split("{")[0]
     assert head not in setup_web._failed_body(session, failed)
-    assert head not in setup_web._connect_failed_body(session, connect_failed)
+    assert head not in setup_web._added_body(session, connect_failed)
     assert head not in manage_web._action_body(msession, stopped)
-    assert manage_web.REMAINS_LOG.split("{")[0] not in manage_web._remains()
+    assert manage_web.STAYS_SAID.split("{")[0] not in manage_web._stays(())
 
 
 # --- Invariant 7: the developer's own log ----------------------------------

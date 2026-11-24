@@ -84,6 +84,8 @@ class Client:
     key_prefix: str                    # every key this kit writes starts here
     locations: tuple[Location, ...]
     restart: str                       # the last line of a real connect report
+    lock_names: tuple[str, ...] = ()   # what the client keeps beside its settings while it runs
+    reach: str = ""                    # which of the client's sessions an entry reaches
 
 
 _DESKTOP = Client(
@@ -121,9 +123,21 @@ _DESKTOP = Client(
         ),
     ),
     restart="Fully quit and reopen Claude Desktop.",
+    # BUG-0018: Claude Desktop keeps the settings it loaded and can write
+    # them back over a change made while it runs. On Windows it holds this
+    # lock file in the folder that keeps its settings, from its start until
+    # it quits (seen on the owner's machine, 2026-11-19). A folder is asked
+    # rather than a list of programs, because Claude Code's own program
+    # carries the same file name. Linux is not covered: its lock was not
+    # seen on a real install.
+    lock_names=("lockfile",),
+    # Issue #62: an entry in this file is not scoped to the project. Every
+    # session the client opens starts both servers, so the setup page says
+    # so before the box is ticked.
+    reach="Every Claude Desktop session gets both: chat, the Code tab and local Cowork.",
 )
 
-# Two strings in that row are user-facing: `label` and `restart`. They
+# Three strings in that row are user-facing: `label`, `restart` and `reach`. They
 # live here rather than in report.py for the reason `SkillEntry.summary`
 # does: a second client must cost one row, not one row plus a branch in
 # the renderer. A test pins that no function below reads a client name.
@@ -263,6 +277,26 @@ def detect(client: Client, *, env=None) -> tuple[Copy, ...]:
             seen.add(marker)
             found.append(Copy(label=location.label, path=resolved))
     return tuple(found)
+
+
+def is_running(client: Client, paths) -> bool:
+    """Whether the client looks open beside any of these settings files.
+
+    The callers pass only the files a run changes, or would change, so a
+    run that changes none warns of nothing. A lock a crash left behind
+    costs one needless warning, which is the cheaper mistake: missing an
+    open client is the bug itself. Never raises; a folder that cannot be
+    read warns of nothing.
+    """
+    for path in paths:
+        folder = Path(path).parent
+        for name in client.lock_names:
+            try:
+                if (folder / name).exists():
+                    return True
+            except OSError:
+                continue
+    return False
 
 
 def installed(*, env=None) -> tuple[Client, ...]:
@@ -711,6 +745,7 @@ class ConnectResult:
     current: bool = False                # every copy already registers this
     record_created: bool = False         # the record file did not exist yet
     entries: dict = field(default_factory=dict)  # both entries, by key
+    running: bool = False                # the client is open beside a copy this changes
 
     @property
     def keys(self) -> tuple[str, ...]:
@@ -747,6 +782,7 @@ class UnconnectPlan:
     removals: tuple[Path, ...]
     dir_created: bool = False            # the kit made .radialrig/ itself
     keys: tuple[str, ...] = ()           # every key the record claimed
+    running: bool = False                # the client is open beside a copy this changes
 
     @property
     def entries(self) -> tuple[mnt.Disposition, ...]:
@@ -1082,6 +1118,8 @@ def _compose_connect(
         root=root, client=client, scope=resolved_scope, key=key, entry=entry,
         connected=day, copies=tuple(plans), record_after=record_after,
         record_created=not existed, entries=entries,
+        running=is_running(
+            client, [plan.copy.path for plan in plans if plan.data is not None]),
     )
     return payload, make, result
 
@@ -1164,6 +1202,80 @@ def _held_keys(data: bytes, client: Client) -> tuple[str, ...]:
     )
 
 
+_SPACE = b" \t\r\n"
+
+
+def _cut_keeps_the_rest(data: bytes, remainder: bytes, keys, container: str) -> bool:
+    """Whether the cut took this project's entries and nothing else, as
+    JSON reads the file before and after. A file that did not parse
+    before has nothing to compare: the cut stands on its own.
+
+    A file that parsed must still parse, hold every other entry and
+    setting unchanged, and lose only these keys; an object the connect
+    created may go with the last of them. Anything else, such as a copy
+    of the region cut from elsewhere in the file, is not this cut's to
+    make, and the structural route runs instead.
+    """
+    try:
+        before = json.loads(data.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return True
+    try:
+        after = json.loads(remainder.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return False
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        return False
+    servers = before.get(container)
+    if not isinstance(servers, dict):
+        return False
+    rest = {k: v for k, v in servers.items() if k not in keys}
+    if ({k: v for k, v in before.items() if k != container}
+            != {k: v for k, v in after.items() if k != container}):
+        return False
+    if container in after:
+        return after[container] == rest
+    return not rest
+
+
+def _cut_region(data: bytes, region: bytes) -> bytes:
+    """`data` with its one copy of `region` cut out.
+
+    Projects connected in turn share one settings file: each later
+    region lands ahead of the earlier ones and ends with a comma. Cutting
+    out an earlier one left that comma before the closing brace, and the
+    file stopped parsing (BUG-0027). So a comma the cut leaves right
+    before a closing brace goes too. When the file held the container
+    before the first connect, the file is back to its bytes from before
+    that connect once every project has gone, in any order.
+    """
+    at = data.index(region)
+    head, tail = data[:at], data[at + len(region):]
+    kept = head.rstrip(_SPACE)
+    if kept.endswith(b",") and tail.lstrip(_SPACE).startswith(b"}"):
+        return kept[:-1] + head[len(kept):] + tail
+    return head + tail
+
+
+def _region_lost_its_comma(data: bytes, region: bytes) -> tuple[bytes, int]:
+    """The region without its closing comma, when `_cut_region` took that
+    comma as the entries after it came out, with how often the file holds
+    it; else the region unchanged and 0.
+
+    Counts only where a closing brace follows, which is where that cut
+    leaves it.
+    """
+    if not region.endswith(b","):
+        return region, 0
+    bare = mnt._held_region(data, region[:-1])
+    if data.count(bare) != 1:
+        return region, 0
+    after = data[data.index(bare) + len(bare):]
+    if not after.lstrip(_SPACE).startswith(b"}"):
+        return region, 0
+    return bare, 1
+
+
 def _unconnect_copy(entries: dict, client: Client, item: dict):
     """What the reversal does to one recorded copy, step for step.
 
@@ -1208,15 +1320,22 @@ def _unconnect_copy(entries: dict, client: Client, item: dict):
         # hashes to the pre-connect record.
         region = mnt._held_region(data, insert.encode("utf-8"))
         seen = data.count(region)
+        if seen == 0:
+            region, seen = _region_lost_its_comma(data, region)
         if seen == 1:
-            remainder = data.replace(region, b"", 1)
-            restored = mnt._recorded_form(remainder, item.get("pre_connect_sha256"))
-            if restored is not None:
-                return (mnt.Disposition(shown, mnt.RESTORED, mnt.CONNECT_RESTORED),
-                        ("write", restored))
-            return (mnt.Disposition(shown, mnt.EXCISED, mnt.CONNECT_EXCISED_REGION),
-                    ("write", remainder))
-        if seen > 1:
+            remainder = _cut_region(data, region)
+            # A file that parsed is never written back broken or missing
+            # anything but these entries: when the cut would do that,
+            # the structural route below runs.
+            if _cut_keeps_the_rest(data, remainder, entries, container):
+                restored = mnt._recorded_form(
+                    remainder, item.get("pre_connect_sha256"))
+                if restored is not None:
+                    return (mnt.Disposition(shown, mnt.RESTORED, mnt.CONNECT_RESTORED),
+                            ("write", restored))
+                return (mnt.Disposition(shown, mnt.EXCISED, mnt.CONNECT_EXCISED_REGION),
+                        ("write", remainder))
+        elif seen > 1:
             return mnt.Disposition(shown, mnt.LEFT, mnt.CONNECT_AMBIGUOUS), None
 
     # The region is gone or the file was reformatted: drop the key
@@ -1293,6 +1412,7 @@ def _unconnect_plan(root: Path, client_name: str, *, env, paths) -> UnconnectPla
         dispositions=tuple(dispositions),
         writes=tuple(sorted(writes.items())), removals=tuple(sorted(removals)),
         dir_created=bool(body.get("dir_created")), keys=tuple(entries),
+        running=is_running(client, [*writes, *removals]),
     )
 
 

@@ -22,6 +22,7 @@ assert against a listing that can never hold anything.
 
 from __future__ import annotations
 
+import dataclasses
 import html
 import http.client
 import io
@@ -37,6 +38,7 @@ from pathlib import Path
 import pytest
 
 from radialrig import cli
+from radialrig import activity_log as al
 from radialrig import connect as cn
 from radialrig import manage_web
 from radialrig import mount as mnt
@@ -44,6 +46,7 @@ from radialrig import report
 from radialrig import roster as ro
 from radialrig import setup_web
 from radialrig import skills as sk
+from radialrig import update
 from radialrig.paths import ROOT_ENV, packaged_web
 from radialrig.tests.test_connect import (  # noqa: F401 - helpers, by name
     CONFIG_HOSTS,
@@ -67,32 +70,37 @@ PREFIX = cn.CLIENTS[CLIENT].key_prefix
 SKILL = "session-handoff"
 SKILL_DIR = ".claude/skills/session-handoff"
 
-# A press's rows: the chip, the path, the sentence. The listing no longer
-# draws this shape (PLAN-0014 phase 1) and the project page no longer
-# draws its one-row table (phase 2); `LISTING_ROW` below reads the
-# listing, and `FACT_BLOCK` the project page's Status section.
+# A press's rows on today's plan and result pages: the chip, the path,
+# the sentence. Projects and one project draw no such table (PLAN-0027
+# phase 1); `ROSTER_ROW` below reads a row of Projects.
 ROW = re.compile(
     r'<tr><td class="verb"><span class="chip[^"]*">([a-z]+)</span></td>'
     r'<td class="path">([^<]*)</td><td class="why">([^<]*)</td>'
     r'(?:<td class="act">.*?</td>)?</tr>'
 )
-# The listing's row (PLAN-0014 phase 1): the folder's name in its own
-# element, the repair chip beside it where the row carries one, the
-# parent path beneath, the three facts, and the row's control.
-LISTING_ROW = re.compile(
-    r'<tr id="row-[0-9a-f]{12}"><td class="project"><span class="title"><span class="name">([^<]*)</span>'
-    r'(.*?)</span>(?:<span class="parent">([^<]*)</span>)?</td>'
-    r'<td class="status">(.*?)</td><td class="act">.*?</td></tr>', re.S
-)
-FACT = re.compile(r'<span class="fact ([a-z]+)">([^<]*)</span>')
-# The project page's Status section says the same three facts as blocks
-# (PLAN-0014 phase 2).
-FACT_BLOCK = re.compile(r'<p class="fact ([a-z]+)">([^<]*)</p>')
-# The chip's whole text, glyph first: what a reader scanning by shape
-# meets, and what the words say once past it.
-REPAIR = f"{manage_web.REPAIR_GLYPH} {manage_web.REPAIR_CHIP}"
+# A row of Projects (PLAN-0027 phase 1 prescription 4): the folder's name
+# over its parent, one status as a mark and a word, one line of facts,
+# and one button where something needs doing.
+ROSTER_ROW = re.compile(
+    r'<li class="roster-row( gone)?"(?: id="(row-[0-9a-f]{12})")?>(.*?)</li>', re.S)
+ROW_NAME = re.compile(r'class="row-name"[^>]*>([^<]*)<')
+ROW_PARENT = re.compile(r'<span class="parent">([^<]*)</span>')
+# A status, as the look draws it: the mark (hidden from a reader by ear)
+# and the word or sentence beside it.
+STATE = re.compile(
+    r'<span class="state"><span class="symbol ([a-z]+)" aria-hidden="true">'
+    r'([^<]*)</span><span>([^<]*)</span></span>')
+ROW_ABOUT = re.compile(r'<div class="about"><span>([^<]*)</span>')
+ROW_FIX = re.compile(r'<div class="fix">(.*?)</div>', re.S)
+# A submit button's words, after the glyph a cell or a back link leads
+# with.
+BUTTON = re.compile(
+    r'<button([^>]*) type="submit">(?:<span aria-hidden="true">[^<]*</span>)?([^<]*)</button>')
 ANCHOR = re.compile(r'<a\b[^>]*\bhref="([^"]*)"')
 TAGS = re.compile(r"<[^>]+>")
+# A folder path drawn in pieces that wrap only after a separator
+# (`setup_web.folder_path`, PLAN-0027 phase 5 C3) reads as one path.
+PIECES = re.compile(r'<span class="seg">([^<]*)</span>(?:<wbr>)?')
 GET_FORM = re.compile(
     r'<form class="nav" method="get" action="([^"]+)">(.*?)</form>', re.S)
 HIDDEN = re.compile(r'<input type="hidden" name="([^"]+)" value="([^"]*)">')
@@ -226,85 +234,95 @@ def rows(page: str) -> list[tuple[str, str, str]]:
 
 # --- the listing's rows (PLAN-0014 phase 1) ---------------------------
 
-def listing_rows(page: str) -> list[tuple[str, str, str, list[tuple[str, str]]]]:
-    """Every row of the listing: name, parent, chip text, and the facts."""
+def roster_rows(page: str) -> list[tuple[str, str, str, str, str]]:
+    """Every row of Projects, in the order drawn: the folder's name, its
+    parent, the status word, the line of facts, and the words of the row's
+    one button, or "" where it carries none."""
     out = []
-    for name, chip, parent, status in LISTING_ROW.findall(page):
-        facts = [(which, html.unescape(said)) for which, said in FACT.findall(status)]
-        out.append((
-            html.unescape(name), html.unescape(parent),
-            " ".join(html.unescape(TAGS.sub(" ", chip)).split()), facts,
-        ))
+    for _, _, inner in ROSTER_ROW.findall(main_of(page)):
+        parent = ROW_PARENT.search(inner)
+        fix = ROW_FIX.search(inner)
+        button = BUTTON.search(fix.group(1)) if fix else None
+        out.append(tuple(html.unescape(part) for part in (
+            ROW_NAME.search(inner).group(1),
+            parent.group(1) if parent else "",
+            STATE.search(inner).group(3),
+            ROW_ABOUT.search(inner).group(1),
+            button.group(2) if button else "",
+        )))
     return out
 
 
-def facts_of(state: ro.ProjectState) -> list[tuple[str, str]]:
-    """Constraint 3's mapping, written out in the page's words.
+def roster_row(page: str, name: str) -> str:
+    """One row's markup, found by the folder's name."""
+    for _, _, inner in ROSTER_ROW.findall(main_of(page)):
+        if html.unescape(ROW_NAME.search(inner).group(1)) == name:
+            return inner
+    raise AssertionError(f"no row for {name}")
+
+
+def listed() -> tuple[ro.ProjectState, ...]:
+    """The listing as the page reads it: each standing, mounted project
+    knowing whether its update would write something."""
+    return tuple(
+        dataclasses.replace(s, behind=update.behind(Path(s.root)))
+        if s.exists and s.mounted else s
+        for s in ro.listing())
+
+
+def facts_of(state: ro.ProjectState) -> str:
+    """A row's line of facts, written out in `wording.md`'s words.
 
     Literal here rather than read off the module, so this file and not
-    the page is the pin. The mismatch line is the repair sentence of
-    phase 3, written out: the label of the client the record claims,
-    filled from the table, or the record file where it claims none this
-    build knows.
+    the page is the pin. The connection first, named only where a client
+    is installed here or the project is connected to one, then the count
+    of skills either agent has.
     """
-    client = cn.CLIENTS.get(state.connected)
-    claimed = cn.CLIENTS.get(state.claimed)
-    if state.connected == ro.CONNECTED_MISMATCH and claimed is not None:
-        connection = (f"{claimed.label}'s settings no longer carry the entry "
-                      "this project's record claims")
-    elif state.connected == ro.CONNECTED_MISMATCH:
-        connection = ("This project's record names no client this build knows: "
-                      f"see {Path(state.root) / cn.CONNECT_REL}")
-    elif client is None:
-        # Named only where the client is installed on this machine, and
-        # left out where it is not (the owner's answer of 2026-10-01).
-        connection = (f"Not connected to {cn.CLIENTS[CLIENT].label}"
-                      if cn.installed() else None)
-    else:
-        connection = f"Connected to {client.label}"
-    return [
-        ("mounted", "Mounted" if state.mounted else "Not mounted"),
-        # A project whose update would write something says so, right
-        # after the mount fact (PLAN-0021 phase 1 prescription 4).
-        *([("update", "Update available")] if getattr(state, "behind", False) else []),
-        *([("connection", connection)] if connection else []),
-        *(("skills", said) for said in skills_facts_of(state)),
-    ]
-
-
-def skills_facts_of(state: ro.ProjectState) -> list[str]:
-    """The skills fact as PLAN-0015 phase 2 prescription 5 writes it: one
-    count where every agent has the same skills, one line per agent,
-    labelled from the map, where they differ."""
-    def count(n: int) -> str:
-        return "no skills" if n == 0 else "1 skill" if n == 1 else f"{n} skills"
-
-    if len({names for _, names in state.agents}) <= 1:
-        return [count(len(state.skills)).replace("no skills", "No skills")]
-    return [f"{sk.HARNESSES[name].label}: {count(len(names))}"
-            for name, names in state.agents]
-
-
-def group_of(state: ro.ProjectState) -> int:
-    """Needs repair, then not mounted, then the rest."""
+    label = cn.CLIENTS[CLIENT].label
+    count = len(state.skills)
+    skills = "no skills" if count == 0 else "1 skill" if count == 1 else f"{count} skills"
     if state.connected == ro.CONNECTED_MISMATCH:
-        return 0
-    return 1 if not state.mounted else 2
+        return f"{label} link lost, {skills}"
+    if state.connected == CLIENT:
+        return f"{label} connected, {skills}"
+    if not cn.installed():
+        return skills[0].upper() + skills[1:]
+    if count == 0:
+        return "No connections or skills"
+    return f"{label} not connected, {skills}"
 
 
-def expected_listing(states) -> list[tuple[str, str, str, list[tuple[str, str]]]]:
-    """What the listing draws for these states, in the order it draws them."""
-    return [
-        (Path(state.root).name, str(Path(state.root).parent),
-         REPAIR if state.connected == ro.CONNECTED_MISMATCH else "",
-         facts_of(state))
-        for state in sorted(states, key=group_of)
-    ]
+STATUS_ORDER = ("Needs repair", "Update ready", "Not set up", "Working", "Folder gone")
+
+
+def expected_row(state: ro.ProjectState, *, offered: bool = True) -> tuple[str, str, str, str, str]:
+    """What Projects draws for one state. `offered` is whether Repair's
+    guard offers its press on a lost link."""
+    name, parent = Path(state.root).name, str(Path(state.root).parent)
+    if not state.exists:
+        return (name, parent, "Folder gone",
+                "This folder isn't on this computer now, so it's off the project list.", "")
+    if state.connected == ro.CONNECTED_MISMATCH:
+        status, fix = "Needs repair", "Repair" if offered else ""
+    elif state.behind:
+        status, fix = "Update ready", "Update"
+    elif not state.mounted:
+        status, fix = "Not set up", "Set up"
+    else:
+        status, fix = "Working", ""
+    return (name, parent, status, facts_of(state), fix)
+
+
+def expected_listing(states) -> list[tuple[str, str, str, str, str]]:
+    """What Projects draws for these states, in the order it draws them:
+    the rows that need attention first, each group in the list's order."""
+    return sorted((expected_row(s) for s in states),
+                  key=lambda row: STATUS_ORDER.index(row[2]))
 
 
 def visible(page: str) -> str:
     body = page.split("<main>", 1)[-1].split("</main>", 1)[0]
-    return TAGS.sub(" ", body)
+    return TAGS.sub(" ", PIECES.sub(r"\1", body))
 
 
 def text_of(page: str) -> str:
@@ -421,9 +439,12 @@ def test_the_manage_url_line_is_pinned(manage, monkeypatch, kind, open_browser):
 
 # --- the listing ------------------------------------------------------
 
-def test_the_manage_page_lists_the_roster_with_the_cli_sentences(
+def test_projects_lists_the_roster_one_row_each_and_the_cli_keeps_its_sentences(
     tmp_path, env, client_here, command, capsys, manage,
 ):
+    """PLAN-0027 phase 1 prescription 4: one row per project the roster
+    names, in `wording.md`'s words; the command line's listing reads the
+    same roster and keeps its own rows, sentence for sentence."""
     alpha = registered(capsys, _make_project(tmp_path / "alpha"), skill=True)
     beta = registered(capsys, _make_project(tmp_path / "beta"))
     drop_entry(client_here, record_of(beta)["key"])
@@ -432,113 +453,119 @@ def test_the_manage_page_lists_the_roster_with_the_cli_sentences(
 
     states = ro.listing()
     found = ro.orphans()
-    # The page says each project's state through constraint 3's mapping
-    # (PLAN-0014 phase 1), where it used to print the command line's rows
-    # word for word; the roster's order is the command line's, and the
-    # page's order puts the row that needs a reader first.
-    assert listing_rows(page) == expected_listing(states)
     assert [state.root for state in states] == [
         str(alpha.resolve()), str(beta.resolve())]
-    assert [name for name, *_ in listing_rows(page)] == ["beta", "alpha"]
+    assert roster_rows(page) == expected_listing(listed())
+    assert [name for name, *_ in roster_rows(page)] == ["beta", "alpha"]
 
     code, out, err = run(capsys, "projects")
     assert (code, err) == (0, "")
-    # The command line's own rows are unchanged, sentence for sentence.
+    # The command line's own rows are unchanged, sentence for sentence,
+    # its mismatch clause and remedy tail with them.
     for d in ro.report_rows(states, found):
         assert ro.reason_text(d) in out
-    said = text_of(page)
-    # The mismatch row says the same sentence on both surfaces, naming
-    # the client the record claims (PLAN-0014 phase 3). The command
-    # line keeps its remedy tail with the placeholders; the listing drops
-    # it, because the row's chip and sentence say what to do and where.
     label = cn.CLIENTS[CLIENT].label
     assert ro.MISMATCH_CLAUSE.format(label=label) in out
-    assert ro.MISMATCH_CLAUSE.format(label=label) in said
     assert report.PROJECTS_MISMATCH_TAIL in out
+    assert out.splitlines()[0] == report.projects_head(states, found)
+    # The page says each state in its own words: a status and a line of
+    # facts, never the command line's clause, tail or count line.
+    said = text_of(page)
+    assert said.startswith(manage_web.ROSTER_HEAD)
+    assert ro.MISMATCH_CLAUSE.format(label=label) not in said
     assert report.PROJECTS_MISMATCH_TAIL not in said
+    assert out.splitlines()[0] not in said
     assert "<client>" not in said and "<PATH>" not in said
 
-    # The page names the machine and lets the rows be the count; the
-    # command line's count line stays on the command line.
-    assert said.startswith(manage_web.ROSTER_HEAD)
-    assert out.splitlines()[0] == report.projects_head(states, found)
-    assert out.splitlines()[0] not in said
-    assert manage_web.ROSTER_CAPTION in said
-
-    # One control per standing project, on the project's own row. One
-    # chip on the whole listing, outlined, on the row that needs repair;
-    # the neutral chip and the state column are gone with the hint that
-    # explained them.
+    # One opener per row, and beta's Repair names its root once more; no
+    # table on this screen.
     assert page.count(f'value="{alpha.resolve()}"') == 1
-    assert page.count(f'value="{beta.resolve()}"') == 1
-    assert page.count('<td class="act">') == 2
-    assert page.count('<span class="chip touches">') == 1
-    assert page.count('<span class="chip">') == 0
+    assert page.count(f'value="{beta.resolve()}"') == 2
+    assert main_of(page).count('<li class="roster-row"') == 2
     assert rows(page) == []
-    assert '<th scope="col">State</th>' not in page
+    assert "<table" not in main_of(page)
 
 
-def test_an_empty_roster_says_so_the_way_the_command_line_does(
-    tmp_path, env, capsys, manage,
-):
+def test_an_empty_roster_says_so_in_the_new_words(tmp_path, env, capsys, manage):
+    """`wording.md`'s empty list: "No projects yet" and its sentence. The
+    command line's own sentence for an empty machine stays on the command
+    line (PLAN-0027 phase 1 dropped it from the page)."""
     page = manage().page()
-    assert listing_rows(page) == []
+    assert roster_rows(page) == []
     said = text_of(page)
     code, out, _ = run(capsys, "projects")
     assert code == 0
-    # Every sentence the command line says about an empty machine, said
-    # here too. Its count line is the one line that stays behind: this
-    # page names the machine in its heading and lets the rows count
-    # themselves, and with no row there is no table to count.
-    counted = report.projects_head((), ())
-    for line in out.splitlines():
-        # The engine line stays behind with it: this page carries the
-        # version in its masthead, outside the text read here
-        # (PLAN-0018 phase 1).
-        if line and line not in (counted, report.engine_line()):
-            assert line in said, line
-    assert report.PROJECTS_NONE in said
-    assert counted not in said
-    assert manage_web.ROSTER_HEAD in said
-    # No rows, so no table; the add block stands in its place.
+    assert report.PROJECTS_NONE in out
+    assert report.PROJECTS_NONE not in said
+    assert manage_web.EMPTY_HEAD == "No projects yet"
+    assert manage_web.EMPTY_LEDE == "Choose a folder to set up your first project."
+    assert manage_web.EMPTY_HEAD in said and manage_web.EMPTY_LEDE in said
+    assert said.startswith(manage_web.ROSTER_HEAD)
+    assert report.projects_head((), ()) not in said
+    assert '<ul class="roster">' not in main_of(page)
     assert "<table" not in main_of(page)
-    assert manage_web.ROSTER_CAPTION not in said
 
 
-def test_orphan_entries_are_listed_with_their_command(
+LEFTOVER_ROW = re.compile(r'<li class="roster-row leftover-row">(.*?)</li>', re.S)
+
+
+def test_a_gone_folders_entries_are_one_row_and_unpinned_ones_one_line(
     tmp_path, env, client_here, manage,
 ):
+    """Entries Claude Desktop still holds for a folder that is gone are
+    one row of Projects (PLAN-0027 phase 3 prescription 5): the folder's
+    name over its parent, Needs repair, the facts in `wording.md`'s words,
+    and Clean up, one press that names the folder and the screen, with
+    each entry's command under Show commands, in order. It is the first
+    row that needs repair, so it takes the screen's amber. Entries that
+    name no project folder stand behind one line under the list with the
+    engine's sentence and no press, as today."""
+    vanished = tmp_path / "vanished"
     body = json.loads(client_here.read_text(encoding="utf-8"))
     body["mcpServers"] = {
-        f"{PREFIX}old": {"command": "x", "args": [],
-                         "env": {ROOT_ENV: str(tmp_path / "vanished")}},
+        f"{PREFIX}old": {"command": "x", "args": [], "env": {ROOT_ENV: str(vanished)}},
+        f"{PREFIX}old-write": {"command": "x", "args": [], "env": {ROOT_ENV: str(vanished)}},
         f"{PREFIX}bare": {"command": "x", "args": []},
     }
     client_here.write_text(json.dumps(body, indent=2), encoding="utf-8")
 
-    page = manage().page()
-
+    run_ = manage()
+    page = run_.page()
     found = ro.orphans()
-    assert [orphan.key for orphan in found] == [f"{PREFIX}bare", f"{PREFIX}old"]
-    loose = found[1]
-    # A loose entry is not a project, so it is not a row of the listing:
-    # it stands in its own block beneath, with its command (PLAN-0014
-    # phase 1 prescription 4).
-    assert listing_rows(page) == []
-    assert "<table" not in main_of(page)
-    said = text_of(page)
-    assert ro.orphan_command(loose) in said
-    assert manage_web.ORPHAN_HEAD in said
-    # The command is offered as a copy block, the setup page's idiom,
-    # and the press names the entry it removes (PLAN-0014 phase 2).
-    assert f'data-copy="{ro.orphan_command(loose)}"' in page
-    assert manage_web.ORPHAN_LABEL.format(key=loose.key) in said
-    assert f'<h3 class="name">{loose.key}</h3><p class="what">' in page
-    # An entry pinning no root is named and offered nothing: radialrig
-    # cannot show it is an orphan.
+    assert [orphan.key for orphan in found] == [
+        f"{PREFIX}bare", f"{PREFIX}old", f"{PREFIX}old-write"]
+    label = cn.CLIENTS[CLIENT].label
+    # Not a project, so not one of the list's project rows; a row of its own.
+    assert roster_rows(page) == []
+    (row,) = LEFTOVER_ROW.findall(main_of(page))
+    assert ROW_NAME.search(row).group(1) == "vanished"
+    assert html.unescape(ROW_PARENT.search(row).group(1)) == str(tmp_path)
+    assert STATE.search(row).groups() == ("repair", "!", "Needs repair")
+    assert html.unescape(ROW_ABOUT.search(row).group(1)) == (
+        f"Folder gone, {label} entries left")
+    (fields,) = [dict(HIDDEN.findall(inner)) for inner in POST_PRESS.findall(row)]
+    assert fields == {"token": run_.session.token, "action": manage_web.ORPHAN,
+                      "client": CLIENT, "root": str(vanished),
+                      "confirm": "yes", "from": manage_web.ROSTER}
+    assert '<button class="primary" aria-label="Clean up vanished" type="submit">' in row
+    assert [html.unescape(c) for _, c, _ in COPY_LINE.findall(row)] == [
+        ro.orphan_command(found[1]), ro.orphan_command(found[2])]
+    assert main_of(page).replace(
+        f'<button class="primary" type="submit">{manage_web.ADD_LABEL}</button>', ""
+    ).count(PRIMARY) == 1
+
+    # The one that names no folder: one line, its sentence, no press.
+    block = main_of(page).split('<details class="leftover">', 1)[1].split("</details>", 1)[0]
+    said = " ".join(html.unescape(TAGS.sub(" ", block)).split())
+    assert f"{label} has 1 RadialRig entry that names no project folder." in said
+    assert manage_web.LEFTOVER_SHOW in said
+    assert f"{PREFIX}bare" in said
     assert ro.ROSTER_REASONS[ro.ROSTER_UNPINNED] in said
-    assert f'data-copy="radialrig unconnect {CLIENT} --orphan {PREFIX}bare"' \
-        not in page
+    assert POST_PRESS.search(block) is None
+    assert f'data-copy="radialrig unconnect {CLIENT} --orphan {PREFIX}bare"' not in page
+    assert manage_web.LEFTOVER_LOOSE_MANY.format(label=label, count=2) == (
+        f"{label} has 2 RadialRig entries that name no project folder.")
+    assert run_.running
 
 
 # --- PLAN-0014 phase 1: the listing says which project needs you ------
@@ -570,41 +597,36 @@ def three_projects(tmp_path, capsys, client_here) -> tuple[Path, Path, Path]:
 def test_the_listing_leads_with_the_heading_and_the_name_first_rows(
     tmp_path, env, client_here, command, capsys, manage,
 ):
-    """Prescription 1: "Projects", then each folder's own name first.
-
-    The name is one element and the parent path another beneath it; the
-    two together are the whole path, on the row as text a reader can
-    select. The stylesheet keeps the name on one line and sets the
-    parent in the secondary mono treatment.
-    """
+    """"Projects", then each folder's own name first, over its parent
+    folder. The name is the control that opens the project; the parent is
+    text a reader can select, in the mono treatment, on one line."""
     three_projects(tmp_path, capsys, client_here)
     page = manage().page()
     body = main_of(page)
 
     assert manage_web.ROSTER_HEAD == "Projects"
-    assert f"<h1>{manage_web.ROSTER_HEAD}</h1>" in body
-    drawn = listing_rows(page)
+    assert f'<header class="page-head"><h1>{manage_web.ROSTER_HEAD}</h1>' in body
+    drawn = roster_rows(page)
     assert [name for name, *_ in drawn] == ["beta", "gamma", "alpha"]
-    for name, parent, _, _ in drawn:
+    for name, parent, *_ in drawn:
         root = tmp_path.resolve() / name
         assert parent == str(root.parent)
         assert str(Path(parent) / name) == str(root)
-        assert f'<span class="name">{name}</span>' in body
-        assert f'<span class="parent">{html.escape(parent)}</span>' in body
-    # Each name leads its row: the name element comes before the parent
-    # element, and the full path is on the row as text.
-    for row in LISTING_ROW.finditer(body):
-        assert row.group(1) and row.group(3)
-        assert body.index(row.group(1), row.start()) < body.index(row.group(3), row.start())
-
+        row = roster_row(page, name)
+        assert f'<button class="row-name" type="submit">{name}</button>' in row
+        assert f'<span class="parent">{html.escape(parent)}</span>' in row
+        assert row.index('class="row-name"') < row.index('<span class="parent">')
     css = (packaged_web() / "page.css").read_text(
         encoding="utf-8").replace("\r\n", "\n")
-    name_rule = css.split("table.plan.projects .name {", 1)[1].split("}", 1)[0]
+    name_rule = css.split(".screen .row-name, .screen button.row-name {", 1)[1].split("}", 1)[0]
     assert "white-space: nowrap" in name_rule
-    parent_rule = css.split("table.plan.projects .parent {", 1)[1].split("}", 1)[0]
-    assert "Cascadia Mono" in parent_rule
-    assert "var(--faint)" in parent_rule
-    assert "overflow-wrap: anywhere" in parent_rule
+    parent_rule = css.split(".screen .roster-row .parent {", 1)[1].split("}", 1)[0]
+    assert "white-space: nowrap" in parent_rule
+    assert "var(--muted)" in parent_rule
+    mono = css.split(".screen code, .screen .path, .screen .parent {", 1)[1].split("}", 1)[0]
+    assert "Cascadia Mono" in mono
+    # The name's hit area is stretched over the whole row.
+    assert ".screen button.row-name::after { content: \"\"; position: absolute; inset: 0; }" in css
 
 
 def test_a_drive_root_is_its_own_name():
@@ -623,79 +645,108 @@ def test_a_drive_root_is_its_own_name():
     assert Path(parent) == Path("C:/work")
 
 
-def test_a_row_says_its_three_facts_in_the_mapping_order(
+def test_a_row_says_its_facts_in_one_line(
     tmp_path, env, client_here, command, capsys, manage,
 ):
-    """Prescription 2: mounted, connection, skills — three elements.
-
-    The client's label is the client table's; the skill names stay on
-    the project's page, and the listing counts them.
-    """
+    """Prescription 4: one line of facts, the connection then the count of
+    skills. The client's label is the client table's; the skill names stay
+    on the project's own screen."""
     three_projects(tmp_path, capsys, client_here)
     page = manage().page()
-    drawn = listing_rows(page)
-    assert len(drawn) == 3
-    for _, _, _, facts in drawn:
-        assert [which for which, _ in facts] == ["mounted", "connection", "skills"]
-    by_name = {name: facts for name, _, _, facts in drawn}
     label = cn.CLIENTS[CLIENT].label
-    assert by_name["alpha"] == [
-        ("mounted", "Mounted"), ("connection", f"Connected to {label}"),
-        ("skills", "1 skill")]
-    assert by_name["beta"] == [
-        ("mounted", "Mounted"),
-        ("connection", f"{label}'s settings no longer carry the entry this "
-                       "project's record claims"),
-        ("skills", "No skills")]
-    assert by_name["gamma"] == [
-        ("mounted", "Not mounted"), ("connection", f"Connected to {label}"),
-        ("skills", "No skills")]
-    # The skill's name is the project page's to list, not this table's.
-    table = main_of(page).split("</table>", 1)[0]
-    assert SKILL not in table
-    assert "skills:" not in text_of(page)
+    by_name = {name: facts for name, _, _, facts, _ in roster_rows(page)}
+    assert by_name == {
+        "alpha": f"{label} connected, 1 skill",
+        "beta": f"{label} link lost, no skills",
+        "gamma": f"{label} connected, no skills",
+    }
+    assert SKILL not in "".join(
+        inner for _, _, inner in ROSTER_ROW.findall(main_of(page)))
 
 
-def test_only_a_mismatched_row_carries_the_repair_chip(
+def test_only_a_lost_link_reads_needs_repair_and_carries_repair(
     tmp_path, env, client_here, command, capsys, manage,
 ):
-    """Prescription 3: one outlined chip, led by a glyph, and no other.
+    """Prescription 4: one status per row as a mark and a word, and one
+    button only where something needs doing. The mark is found by shape
+    and hidden from a reader by ear; the first Repair is the screen's one
+    amber, and it runs on its one press from this screen (prescription 6)."""
+    alpha, beta, gamma = three_projects(tmp_path, capsys, client_here)
+    run_ = manage()
+    page = run_.page()
+    assert [(name, status, fix) for name, _, status, _, fix in roster_rows(page)] == [
+        ("beta", "Needs repair", "Repair"), ("gamma", "Not set up", "Set up"),
+        ("alpha", "Working", "")]
+    marks = [STATE.search(inner).groups()[:2] for _, _, inner in ROSTER_ROW.findall(main_of(page))]
+    assert marks == [("repair", "!"), ("new", manage_web.GLYPH_MINUS),
+                     ("ok", manage_web.GLYPH_CHECK)]
+    beta_row = roster_row(page, "beta")
+    assert beta_row.count(PRIMARY) == 1
+    assert main_of(page).count(PRIMARY) == 2   # beta's Repair, and Continue in the add block
+    repair = dict(HIDDEN.findall(POST_PRESS.search(beta_row).group(1)))
+    assert repair == {"token": run_.session.token, "action": manage_web.REPAIR,
+                      "root": str(beta.resolve()), "confirm": "yes",
+                      "from": manage_web.ROSTER}
+    assert 'aria-label="Repair beta"' in beta_row
+    # No other row carries the mark or a press that writes.
+    for name in ("alpha", "gamma"):
+        row = roster_row(page, name)
+        assert "symbol repair" not in row and "<form method=\"post\"" not in row
+    # The client is not open, so no before-press sentence.
+    assert 'class="warn"' not in main_of(page)
 
-    The glyph is its own element hidden from the accessibility tree, so
-    the chip is found by shape on the screen and read as its words. The
-    outline is the setup page's `touches` treatment; the amber stays on
-    the press.
-    """
-    three_projects(tmp_path, capsys, client_here)
-    page = manage().page()
-    body = main_of(page)
 
-    chip = ('<span class="chip touches">'
-            f'<span class="glyph" aria-hidden="true">{manage_web.REPAIR_GLYPH}</span> '
-            f"{manage_web.REPAIR_CHIP}</span>")
-    assert body.count(chip) == 1
-    assert body.count('<span class="chip') == 1
-    assert manage_web.REPAIR_CHIP == "Needs repair"
-    assert manage_web.REPAIR_GLYPH == "!"
-    assert [chipped_ for _, _, chipped_, _ in listing_rows(page)] == [REPAIR, "", ""]
-    assert REPAIR in text_of(page)
-    # The chip sits in the mismatched row's project cell, beside the name.
-    row = LISTING_ROW.search(body)
-    assert row.group(1) == "beta"
-    assert chip in row.group(2)
-    assert PRIMARY not in row.group(0)
-    assert "State" not in [head for head in manage_web.ROSTER_COLUMNS]
-    assert not hasattr(manage_web, "ROSTER_HINT")
+def test_a_row_says_why_repair_is_withheld(
+    tmp_path, monkeypatch, env, client_here, command, capsys, manage,
+):
+    """Prescription 7 on Projects: where Repair's guard withholds the
+    press, the row still reads Needs repair and says why in a few words,
+    from the guard (phase 1 review A3)."""
+    alpha, beta, gamma = three_projects(tmp_path, capsys, client_here)
+    label = cn.CLIENTS[CLIENT].label
+    run_ = manage()
+    assert roster_rows(run_.page())[0][2:] == (
+        "Needs repair", f"{label} link lost, no skills", "Repair")
+    assert '<span class="why">' not in main_of(run_.page()), "an offered Repair needs no reason"
+
+    def why(page: str) -> list[str]:
+        row = roster_row(page, "beta")
+        about = row.split('<div class="about">', 1)[1].split("</div>", 1)[0]
+        return [html.unescape(said) for said in re.findall(r'<span class="why">([^<]*)</span>', about)]
+
+    # Claude Desktop's settings file no longer reads as JSON.
+    before = client_here.read_bytes()
+    client_here.write_bytes(b"{ not json\n")
+    page = run_.page()
+    by_name = {name: rest for name, _, *rest in roster_rows(page)}
+    assert by_name["beta"] == ["Needs repair", f"{label} link lost, no skills", ""]
+    assert why(page) == ["RadialRig can't repair it right now. Open it to see why."]
+    client_here.write_bytes(before)
+
+    # Claude Desktop isn't found on this computer.
+    with monkeypatch.context() as patch:
+        patch.setattr(cn, "detect", lambda client, *, env=None: ())
+        assert why(run_.page()) == [f"{label} isn't on this computer."]
+
+    # The record names no client this build knows.
+    record = cn.record_path(beta.resolve())
+    body = json.loads(record.read_text(encoding="utf-8"))
+    body["client"] = "some-other-client"
+    record.write_text(json.dumps(body, indent=2), encoding="utf-8")
+    assert why(run_.page()) == ["RadialRig can't read its connection record."]
+    assert run_.running
 
 
-def test_the_listing_orders_needs_repair_then_not_mounted_then_the_rest(
+def test_the_listing_orders_rows_that_need_attention_first(
     tmp_path, env, client_here, command, capsys, manage,
 ):
-    """Prescription 4: the page sorts; the command line does not.
+    """Prescription 4: needs repair, update ready, not set up, then
+    working, each group in the roster's order. The page sorts; the
+    command line does not.
 
     Five projects, in a roster order the sort must change: healthy,
     unmounted, mismatched, healthy, and one both mismatched and
-    unmounted, which needs repair. Each group keeps roster order.
+    unmounted, which needs repair.
     """
     alpha = registered(capsys, _make_project(tmp_path / "alpha"))
     gamma = _make_project(tmp_path / "gamma")
@@ -708,16 +759,11 @@ def test_the_listing_orders_needs_repair_then_not_mounted_then_the_rest(
     drop_entry(client_here, record_of(epsilon)["key"])
 
     states = ro.listing()
-    roster_order = [Path(s.root).name for s in states]
-    assert roster_order == ["alpha", "gamma", "beta", "delta", "epsilon"]
-    assert [s.connected == ro.CONNECTED_MISMATCH for s in states] == [
-        False, False, True, False, True]
-    assert [s.mounted for s in states] == [True, False, True, True, False]
-
+    assert [Path(s.root).name for s in states] == ["alpha", "gamma", "beta", "delta", "epsilon"]
     page = manage().page()
-    assert [name for name, *_ in listing_rows(page)] == [
+    assert [name for name, *_ in roster_rows(page)] == [
         "beta", "epsilon", "gamma", "alpha", "delta"]
-    assert listing_rows(page) == expected_listing(states)
+    assert roster_rows(page) == expected_listing(listed())
 
     # The command line's rows keep the roster's order, unchanged.
     assert [d.path for d in ro.report_rows(states, ())] == [s.root for s in states]
@@ -728,73 +774,68 @@ def test_the_listing_orders_needs_repair_then_not_mounted_then_the_rest(
     assert positions == sorted(positions)
 
 
-def test_the_top_control_is_a_fragment_link_to_the_add_block(
+def test_add_a_project_opens_the_folder_field_under_the_heading(
     tmp_path, env, client_here, command, capsys, manage,
 ):
-    """Prescription 5: "Add a project" is reachable from the top.
-
-    A same-document fragment link, styled as the ghost button, beside
-    the heading. It changes no view, so it is not one of the navigations
-    that must be a form (`navigations()` counts only GET forms), and it
-    is not an external reference (`EXTERNAL_REF` matches a scheme). It
-    fires no `pagehide`, which is the event the close beacon keys on.
-    """
+    """Prescription 4: "Add a project" sits above the list and opens the
+    folder field. It is a native disclosure, so it changes no view and
+    sends nothing; its Continue is a navigation, a form like every other,
+    so the server goes on standing."""
     three_projects(tmp_path, capsys, client_here)
     run_ = manage()
     page = run_.page()
     body = main_of(page)
 
-    link = f'<a class="ghost" href="#{manage_web.ADD_ID}">{manage_web.ADD_HEAD}</a>'
-    assert body.count(link) == 1
-    assert body.index(link) < body.index("<table")
-    assert body.index(link) < body.index(f'id="{manage_web.ADD_ID}"')
-    assert f'<fieldset class="skills" id="{manage_web.ADD_ID}">' in body
+    head = body.split('<header class="page-head">', 1)[1].split("</header>", 1)[0]
+    assert head.startswith(f"<h1>{manage_web.ROSTER_HEAD}</h1>"
+                           f'<details class="add" id="{manage_web.ADD_ID}">'
+                           f'<summary class="button">{manage_web.ADD_HEAD}</summary>')
     assert body.count(f'id="{manage_web.ADD_ID}"') == 1
-    assert ANCHOR.findall(page) == [f"#{manage_web.ADD_ID}"]
+    assert body.index(f'id="{manage_web.ADD_ID}"') < body.index('<ul class="roster">')
+    assert ANCHOR.findall(page) == []
     assert not EXTERNAL_REF.search(page)
-    # Not a navigation: those are forms, and each one still is.
+    # Continue: a GET to the walkthrough, carrying the field.
+    add = head.split(f'<details class="add" id="{manage_web.ADD_ID}">', 1)[1]
+    action, inner = GET_FORM.search(add).groups()
+    assert action == PATH
+    assert dict(HIDDEN.findall(inner)) == {"s": run_.session.token, "view": manage_web.SETUP}
+    assert '<input id="root" name="root"' in inner
+    assert f'<button class="primary" type="submit">{manage_web.ADD_LABEL}</button>' in inner
+    # Every view change on the screen is a form: three openers, gamma's Set
+    # up, Continue and Remove RadialRig.
     targets = navigations(page, run_.session.token)
-    assert len(targets) == 5   # three Open, the add press, the reversal
+    assert len(targets) == 6
     assert not any("#" in target for target in targets)
     js = (packaged_web() / "page.js").read_text(encoding="utf-8")
     assert 'addEventListener("pagehide"' in js
-    css = (packaged_web() / "page.css").read_text(
-        encoding="utf-8").replace("\r\n", "\n")
-    assert "a.ghost {" in css
-    assert ".head-row {" in css
     assert run_.running
 
 
 def test_an_empty_roster_shows_the_add_block_in_the_listings_place(
     tmp_path, env, manage,
 ):
-    """Prescription 5, the empty shape: the sentence, then the add block.
-
-    No table, no control beside the heading — there is nothing to scroll
-    past — and the add block stands where the listing would, under the
-    command line's own empty sentence, before anything else.
-    """
+    """The empty shape: the heading alone, then where the list would be,
+    "No projects yet", its sentence, and Add a project as the screen's one
+    amber, open to its folder field."""
     page = manage().page()
     body = main_of(page)
-    assert "<table" not in body
-    assert '<div class="head-row">' not in body
-    assert ANCHOR.findall(page) == []
+    assert "<table" not in body and '<ul class="roster">' not in body
+    assert body.count(f'id="{manage_web.ADD_ID}"') == 1
     head = body.index(f"<h1>{manage_web.ROSTER_HEAD}</h1>")
-    empty = body.index(html.escape(report.PROJECTS_NONE))
-    add = body.index(f'id="{manage_web.ADD_ID}"')
-    frame = body.index('<section class="reversal">')
-    assert head < empty < add < frame
-    # Nothing stands between the sentence and the block.
-    between = body[empty + len(html.escape(report.PROJECTS_NONE)):add]
-    assert between == f'</p><fieldset class="skills" '
-    assert ('<div class="actions"><button class="primary" type="submit">'
-            f"{manage_web.ADD_LABEL}</button></div>") in body
+    empty = body.index(f'<div class="empty"><h2>{manage_web.EMPTY_HEAD}</h2>'
+                       f"<p>{manage_web.EMPTY_LEDE}</p>"
+                       f'<details class="add" id="{manage_web.ADD_ID}">'
+                       f'<summary class="button primary">{manage_web.ADD_HEAD}</summary>')
+    foot = body.index('<footer class="foot">')
+    assert head < empty < foot
+    assert '<header class="page-head">' f"<h1>{manage_web.ROSTER_HEAD}</h1></header>" in body
+    assert ANCHOR.findall(page) == []
 
 
 def test_the_add_press_is_disabled_by_the_script_until_the_field_names_a_folder(
     manage,
 ):
-    """Prescription 5: the press follows the field, in page.js.
+    """The press follows the field, in page.js.
 
     The server renders the press without `disabled`, so a plain browser
     with no script keeps the bare submit it has always had; the script
@@ -804,7 +845,9 @@ def test_the_add_press_is_disabled_by_the_script_until_the_field_names_a_folder(
     """
     page = manage().page()
     body = main_of(page)
-    assert "disabled" not in body
+    # As an attribute: the test's own folder name, in the log path the
+    # footer shows, carries the word.
+    assert not re.search(r"<[^>]*\sdisabled\b[^>]*>", body)
     assert '<input id="root" name="root" value=""' in body
 
     js = (packaged_web() / "page.js").read_text(encoding="utf-8")
@@ -818,14 +861,34 @@ def test_the_add_press_is_disabled_by_the_script_until_the_field_names_a_folder(
     assert js.replace("\r\n", "\n") in page
 
 
+def test_a_picked_path_opens_the_closed_details_that_holds_the_field(manage):
+    """On Projects the folder field sits inside Add a project's Details,
+    drawn closed. The shell's picker writes the path into the field and
+    dispatches its `input` event (`picker.rs`, `eval_script`), which it can
+    do from the app's menu with the Details closed. page.js opens the
+    Details that holds the field on that event, so the path shows
+    (PLAN-0027 phase 5 review P1)."""
+    body = main_of(manage().page())
+    add = body.split(f'<details class="add" id="{manage_web.ADD_ID}">', 1)[1]
+    assert '<input id="root" name="root"' in add.split("</details>", 1)[0]
+    assert f'<details class="add" id="{manage_web.ADD_ID}" open' not in body
+
+    js = (packaged_web() / "page.js").read_text(encoding="utf-8").replace("\r\n", "\n")
+    assert 'var holder = field.closest("details");' in js
+    assert 'field.addEventListener("input", function () { holder.open = true; });' in js
+    # Wired on load, from the same field the press follows.
+    assert js.index('var field = document.getElementById("root");') < js.index(
+        'var holder = field.closest("details");')
+
+
 def test_the_browse_button_says_what_the_shells_menu_item_says():
-    """Prescription 6: one wording for the picker, on the page and in the shell.
+    """One wording for the picker, on the page and in the shell.
 
     The shell's menu item keeps its words; the page's button takes them.
     The shell's strings file is read where the checkout carries it.
     """
     assert manage_web.BROWSE_LABEL == "Choose a folder"
-    assert manage_web.ADD_PICKER_NOTE
+    assert manage_web.ADD_FIELD_PLACEHOLDER == "Type or paste a folder path"
     strings = Path(__file__).resolve().parents[3] / "app" / "src" / "strings.json"
     if strings.is_file():
         words = json.loads(strings.read_text(encoding="utf-8"))
@@ -836,21 +899,17 @@ def test_the_browse_button_says_what_the_shells_menu_item_says():
 @pytest.mark.parametrize("connected", [CLIENT, ro.CONNECTED_NO, ro.CONNECTED_MISMATCH])
 @pytest.mark.parametrize("skills", [(), (SKILL,), ("plan-review", SKILL)])
 @pytest.mark.parametrize("installed", [True, False])
+@pytest.mark.parametrize("behind", [False, True])
 def test_the_page_says_a_state_through_the_mapping(
-    mounted, connected, skills, installed, tmp_path, monkeypatch,
+    mounted, connected, skills, installed, behind, tmp_path, monkeypatch,
 ):
-    """Constraint 3's mapping, over every state a project can be in.
+    """`wording.md`'s row, over every state a project can be in: its one
+    status, its line of facts, and its statuses on the project's screen,
+    the most pressing first.
 
-    Mounted by connected by skills, each cell of the table pinned in the
-    page's own words. The mismatch row is the repair sentence of phase 3,
-    filled: the client's label where the record claims one this build
-    knows, and the record file where it claims none. Both spellings are
-    pinned, and the command line's clause is the same sentence.
-
-    A project registered with no client names the client only on a
-    machine that has it installed; elsewhere the page drops the fact,
-    while the command line names the client either way (the owner's
-    answer of 2026-10-01).
+    A project with no client named is said without a client where none
+    is installed here, while the command line names the client either way
+    (the owner's answer of 2026-10-01).
     """
     if installed:
         for name, value in fake_client(tmp_path).items():
@@ -858,52 +917,40 @@ def test_the_page_says_a_state_through_the_mapping(
     root = "C:\\work\\alpha"
     state = ro.ProjectState(
         root=root, exists=True, mounted=mounted, connected=connected,
-        skills=skills, claimed=CLIENT if connected != ro.CONNECTED_NO else "")
-    said = dict(manage_web._facts(state))
-    silent = connected == ro.CONNECTED_NO and not installed
-    assert list(dict(manage_web._facts(state))) == (
-        ["mounted", "skills"] if silent else ["mounted", "connection", "skills"])
-    assert said["mounted"] == ("Mounted" if mounted else "Not mounted")
+        skills=skills, claimed=CLIENT if connected != ro.CONNECTED_NO else "",
+        behind=behind)
+    here = cn.installed()
+    assert manage_web._about(state, here) == facts_of(state)
+    held = []
+    if connected == ro.CONNECTED_MISMATCH:
+        held.append(manage_web.NEEDS_REPAIR)
+    if behind:
+        held.append(manage_web.UPDATE_READY)
+    if not mounted:
+        held.append(manage_web.NOT_SET_UP)
+    assert manage_web._statuses(state) == (tuple(held) or (manage_web.WORKING,))
+    assert expected_row(state)[2] == manage_web.STATUS_WORDS[manage_web._statuses(state)[0]]
     label = cn.CLIENTS[CLIENT].label
-    if connected == CLIENT:
-        assert said["connection"] == f"Connected to {label}"
-    elif connected == ro.CONNECTED_NO:
-        if installed:
-            assert said["connection"] == f"Not connected to {label}"
-        else:
-            assert not any(label in fact for fact in said.values())
-        assert f"; not registered with {label}; " in ro.reason_text(
-            ro.report_rows((state,), ())[0])
-    else:
-        assert said["connection"] == (
-            f"{label}'s settings no longer carry the entry this project's "
-            "record claims")
-        # The same state where the record names no client this build
-        # knows: the sentence names the record file instead.
-        unknown = ro.ProjectState(
-            root=root, exists=True, mounted=mounted, connected=connected,
-            skills=skills)
-        # The file is spelled the way this platform spells a path under
-        # the root, so the pin holds on Linux as on Windows.
-        assert dict(manage_web._facts(unknown))["connection"] == (
-            "This project's record names no client this build knows: "
-            f"see {Path(root) / cn.CONNECT_REL}")
-        assert ro.reason_text(ro.report_rows((unknown,), ())[0]).count(
-            dict(manage_web._facts(unknown))["connection"]) == 1
-    assert said["skills"] == {0: "No skills", 1: "1 skill", 2: "2 skills"}[len(skills)]
-    # The command line's own words for the same state are untouched, and
-    # its mismatch clause is the page's sentence.
-    row = ro.report_rows((state,), ())[0]
-    line = ro.reason_text(row)
+    if connected == ro.CONNECTED_NO and not installed:
+        assert label not in manage_web._about(state, here)
+    # The command line's own words for the same state are untouched.
+    line = ro.reason_text(ro.report_rows((state,), ())[0])
     assert ("mounted" if mounted else "not mounted") in line
     assert ("no skills" if not skills else "skills: " + ", ".join(skills)) in line
+    if connected == ro.CONNECTED_NO:
+        assert f"; not registered with {label}; " in line
     if connected == ro.CONNECTED_MISMATCH:
-        assert f"; {said['connection']}; " in line
+        assert f"; {ro.mismatch_clause(state)}; " in line
+        # A record naming no client this build knows: the row still says
+        # the link is lost, by the table's own phrase.
+        unknown = dataclasses.replace(state, claimed="")
+        assert manage_web._about(unknown, here) == (
+            f"{cn.label_phrase()} link lost, " + facts_of(state).split(", ", 1)[1])
 
 
 def test_an_unreadable_client_profile_costs_the_row_nothing(monkeypatch):
     """`is_dir` raises on a profile directory that denies traversal, and
-    the listing asks about clients once per row. The row says what it
+    the listing asks about clients once per screen. The row says what it
     can and names no client, rather than failing the page (review of
     2026-10-01)."""
     def denied(client, *, env=None):
@@ -914,18 +961,17 @@ def test_an_unreadable_client_profile_costs_the_row_nothing(monkeypatch):
     state = ro.ProjectState(
         root="C:\\work\\alpha", exists=True, mounted=True,
         connected=ro.CONNECTED_NO, skills=())
-    assert manage_web._facts(state) == (
-        ("mounted", "Mounted"), ("skills", "No skills"))
+    assert manage_web._about(state, cn.installed()) == "No skills"
 
 
 def test_an_unreadable_client_profile_costs_the_project_page_nothing(
     tmp_path, env, client_here, command, capsys, manage, monkeypatch,
 ):
-    """The project page's two gates, the registration offer and the
-    repair, each ask `detect` whether the client is on this machine, and
-    `is_dir` raises on a profile directory that denies traversal. Every
-    project's page still opens, and offers no press that writes to a
-    client it could not read, the way the listing names none."""
+    """The project screen's two gates, Connect and Repair, each ask
+    `detect` whether the client is on this machine, and `is_dir` raises on
+    a profile directory that denies traversal. Every project's screen
+    still opens, and offers no press that writes to a client it could not
+    read, the way the listing names none."""
     alpha, beta, gamma = three_projects(tmp_path, capsys, client_here)
     delta = _make_project(tmp_path / "delta")
     assert run(capsys, "mount", str(delta))[0] == 0
@@ -961,8 +1007,10 @@ def test_the_client_label_is_read_from_the_table_at_render_time(monkeypatch):
     state = ro.ProjectState(
         root="C:\\work\\alpha", exists=True, mounted=True,
         connected=CLIENT, skills=())
-    assert dict(manage_web._facts(state))["connection"] == "Connected to Some Other Client"
-    assert manage_web.CONNECTED_FACT == "Connected to {label}"
+    assert manage_web._about(state, (renamed,)) == "Some Other Client connected, no skills"
+    assert manage_web.FACT_CONNECTED == "{label} connected"
+    assert manage_web.CONNECTED_SAID.format(label=renamed.label).startswith(
+        "Connected Some Other Client.")
 
 
 def test_an_unregistered_project_names_only_the_clients_installed_here(monkeypatch):
@@ -979,24 +1027,30 @@ def test_an_unregistered_project_names_only_the_clients_installed_here(monkeypat
     monkeypatch.setattr(cn, "detect", lambda c, *, env=None: c.name == CLIENT)
     state = ro.ProjectState(
         root="C:\\work\\alpha", exists=True, mounted=True,
-        connected=ro.CONNECTED_NO, skills=())
-    assert dict(manage_web._facts(state))["connection"] == (
-        f"Not connected to {client.label}")
+        connected=ro.CONNECTED_NO, skills=(SKILL,))
+    assert manage_web._about(state, cn.installed()) == (
+        f"{client.label} not connected, 1 skill")
     assert f"; not registered with {client.label} or Other Client; " in ro.reason_text(
         ro.report_rows((state,), ())[0])
 
 
-def test_an_agent_with_one_skill_keeps_its_label():
-    """Where the agents' lists differ, each agent's line carries its
-    label at every count: none, one, and more than one."""
-    first, second = list(sk.HARNESSES)[:2]
-    state = ro.ProjectState(
-        root="C:\\work\\alpha", exists=True, mounted=True,
-        connected=ro.CONNECTED_NO, skills=(SKILL,),
-        agents=((first, (SKILL,)), (second, ())))
-    said = [line for which, line in manage_web._facts(state) if which == "skills"]
-    assert said == [f"{sk.HARNESSES[first].label}: 1 skill",
-                    f"{sk.HARNESSES[second].label}: no skills"]
+def test_a_skill_one_agent_has_reads_on_in_its_column_alone(
+    tmp_path, env, client_here, command, capsys, manage,
+):
+    """Where the agents' skills differ, the row on Projects counts the
+    skills either agent has, and the project's grid says each agent's own
+    state in its own column (D-36). The listing's per-agent line of facts
+    is gone with the redesign."""
+    alpha = registered(capsys, _make_project(tmp_path / "alpha"))
+    first, second = list(sk.HARNESSES.values())[:2]
+    assert run(capsys, "skill", "add", SKILL, str(alpha), "--harness", first.name)[0] == 0
+    run_ = manage()
+    label = cn.CLIENTS[CLIENT].label
+    assert [facts for _, _, _, facts, _ in roster_rows(run_.page())] == [
+        f"{label} connected, 1 skill"]
+    cells = grid_cells(project_page(run_, alpha))
+    assert cells[(SKILL, first.label)] == ("on", "On")
+    assert cells[(SKILL, second.label)] == ("off", "Off")
 
 
 def test_no_page_roster_or_report_constant_names_a_client_or_a_skill():
@@ -1027,18 +1081,33 @@ def test_no_page_roster_or_report_constant_names_a_client_or_a_skill():
 # A section's row on the project page: the heading element, then what
 # follows it. Read off the raw markup, because `text_of` puts a space at
 # every tag and would hide a name run into its sentence.
-ROW_HEAD = re.compile(r'<h3 class="(name|label)">([^<]*)</h3>(<[a-z]+)')
+# The skill grid's rows (PLAN-0027 phase 1 prescription 5): the skill's
+# name and its one line, then a cell per agent in the harness map's order.
+GRID_ROW = re.compile(
+    r'<tr( class="retired")?><th scope="row"><span class="skill-info">'
+    r"<strong>([^<]*)</strong><small>([^<]*)</small></span></th>(.*?)</tr>", re.S)
+GRID_CELL = re.compile(r"<td>(.*?)</td>", re.S)
+CELL_BUTTON = re.compile(
+    r'<button class="cell ?([a-z]*)"([^>]*) type="submit">'
+    r'(?:<span aria-hidden="true">[^<]*</span>)?([^<]*)</button>')
+CELL_NOTE = re.compile(r'<span class="cell-note">([^<]*)</span>')
+AGENT_HEAD = re.compile(
+    r'<th scope="col"><span class="agent-head"><span>([^<]*)</span>(.*?)</span></th>', re.S)
 # The command behind its disclosure, with the Copy button inside it.
-DISCLOSED = re.compile(
-    r'<details class="command"><summary>([^<]*)</summary>'
-    r'<div class="cmd"><code>([^<]*)</code>'
+# A command a press runs, under the screen's Show commands switch, with
+# its Copy button named for it.
+COPY_LINE = re.compile(
+    r'<div class="copy-line"><code>([^<]*)</code>'
     r'<button class="copy" type="button" data-copy="([^"]*)" '
-    r'aria-label="([^"]*)">Copy</button></div></details>'
-)
-COPY_BUTTON = re.compile(r'<button class="copy"[^>]*>')
+    r'aria-label="([^"]*)">Copy</button></div>')
 POST_PRESS = re.compile(r'<form method="post" action="[^"]+">(.*?)</form>', re.S)
 GHOST = re.compile(r'<button class="ghost" type="submit">([^<]*)</button>')
-SECTION_HEAD = re.compile(r"<section[^>]*><h2>([^<]*)</h2>")
+
+
+SHOW_COMMANDS_BOX = (
+    '<label class="check"><input type="checkbox" class="show-commands">'
+    f"{manage_web.SHOW_COMMANDS}</label>")
+CONNECTIONS = f'<h2 class="section">{manage_web.CONNECTIONS_HEAD}</h2>'
 
 
 def project_page(run_, root: Path) -> str:
@@ -1048,12 +1117,89 @@ def project_page(run_, root: Path) -> str:
 # One agent's list in the Skills section (PLAN-0015 phase 2): the label
 # as its caption, and everything under it — the whole-catalog press
 # where one stands, then the rows.
-AGENT_LIST = re.compile(
-    r'<fieldset class="skills agent"><legend>([^<]*)</legend>(.*?)</fieldset>', re.S)
 
 
-def agent_lists(body: str) -> list[tuple[str, str]]:
-    return [(html.unescape(label), inner) for label, inner in AGENT_LIST.findall(body)]
+def grid_of(page: str) -> str:
+    return main_of(page).split('<table class="skill-grid">', 1)[1].split("</table>", 1)[0]
+
+
+def grid_cells(page: str) -> dict[tuple[str, str], tuple[str, str]]:
+    """Every cell of the skill grid, by (skill, agent label): its kind
+    (on, off, update, remove, a note, or "" for an empty cell) and its
+    words."""
+    labels = [h.label for h in sk.HARNESSES.values()]
+    out = {}
+    for _, name, _, cells in GRID_ROW.findall(grid_of(page)):
+        for label, cell in zip(labels, GRID_CELL.findall(cells)):
+            found = CELL_BUTTON.search(cell)
+            note = CELL_NOTE.search(cell)
+            if found:
+                out[(html.unescape(name), label)] = (
+                    found.group(1) or "remove", html.unescape(found.group(3)))
+            elif note:
+                out[(html.unescape(name), label)] = ("note", html.unescape(note.group(1)))
+            else:
+                out[(html.unescape(name), label)] = ("", "")
+    return out
+
+
+def grid_presses(page: str) -> dict[tuple[str, str], dict[str, str]]:
+    """The form each cell posts, by (skill, agent label), token dropped."""
+    labels = [h.label for h in sk.HARNESSES.values()]
+    out = {}
+    for _, name, _, cells in GRID_ROW.findall(grid_of(page)):
+        for label, cell in zip(labels, GRID_CELL.findall(cells)):
+            form = POST_PRESS.search(cell)
+            if form is not None:
+                fields = dict(HIDDEN.findall(form.group(1)))
+                fields.pop("token")
+                out[(html.unescape(name), label)] = fields
+    return out
+
+
+def agent_heads(page: str) -> dict[str, dict[str, str] | None]:
+    """Each agent's column head: the form its Add all posts, or None."""
+    out = {}
+    for label, inner in AGENT_HEAD.findall(grid_of(page)):
+        form = POST_PRESS.search(inner)
+        fields = dict(HIDDEN.findall(form.group(1))) if form else None
+        if fields:
+            fields.pop("token")
+        out[html.unescape(label)] = fields
+    return out
+
+
+def status_band(page: str) -> list[tuple[str, str, str]]:
+    """The status band, one row per state that holds: the mark's shape,
+    the sentence, and the words of its fix, or ""."""
+    band = main_of(page).split('<div class="status-band">', 1)[1].split(
+        '<table class="skill-grid">', 1)[0]
+    out = []
+    for part in band.split('<div class="status-row">')[1:]:
+        shape = re.search(r'<span class="symbol ([a-z]+)"', part).group(1)
+        said = re.search(r'<div class="words"><p>([^<]*)</p>', part).group(1)
+        button = BUTTON.search(part)
+        out.append((shape, html.unescape(said), html.unescape(button.group(2)) if button else ""))
+    return out
+
+
+def connections_of(page: str) -> str:
+    return main_of(page).split(CONNECTIONS, 1)[1].split('<div class="project-foot">', 1)[0]
+
+
+def result_of(page: str) -> tuple[str, str, str, str] | None:
+    """The result line at the top of a screen: its tone, its sentence,
+    the after-press sentence or "", and its Details' text or ""."""
+    found = re.search(
+        r'<div class="result ([a-z]+)" role="status" aria-live="polite">(.*?)</div>'
+        r"((?:<details>.*?</details>)?)</div>", main_of(page), re.S)
+    if found is None:
+        return None
+    tone, words, more = found.groups()
+    said = re.findall(r"<p>([^<]*)</p>", words)
+    warn = re.findall(r'<p class="warn">([^<]*)</p>', words)
+    details = " ".join(html.unescape(TAGS.sub(" ", more)).split())
+    return (tone, html.unescape(said[0]), html.unescape(warn[0]) if warn else "", details)
 
 
 def said_lines(page: str) -> list[str]:
@@ -1062,12 +1208,11 @@ def said_lines(page: str) -> list[str]:
             for text in re.findall(r'<p class="said">([^<]*)</p>', main_of(page))]
 
 
-def projects_controls(page: str) -> list[str]:
-    """The action of every navigation labelled with the listing's word."""
+def back_links(page: str) -> list[str]:
+    """The action of every navigation that is the way back to Projects."""
     out = []
     for action, inner in GET_FORM.findall(page):
-        button = GHOST.search(inner)
-        if button is not None and button.group(1) == manage_web.ROSTER_HEAD:
+        if '<button class="link back" type="submit">' in inner:
             out.append(action)
     return out
 
@@ -1075,29 +1220,27 @@ def projects_controls(page: str) -> list[str]:
 def without_commands(page: str) -> str:
     """The page with every command frame cut out, so a path inside a
     command does not count as the page naming it."""
-    return re.sub(r'<div class="cmd">.*?</div>', "", page, flags=re.S)
+    page = re.sub(r'<div class="cmd">.*?</div>', "", page, flags=re.S)
+    return re.sub(r'<div class="copy-line">.*?</div>', "", page, flags=re.S)
 
 
 def test_the_project_page_leads_with_the_name_and_says_the_path_once(
     tmp_path, env, client_here, command, capsys, manage,
 ):
-    """Prescription 1: the heading is the folder's name; the path stands
-    beneath it in the root block, and nowhere else outside a command."""
+    """Prescription 5: the heading is the folder's name, the path beside
+    it, and nowhere else outside a command."""
     alpha, beta, gamma = three_projects(tmp_path, capsys, client_here)
     run_ = manage()
     for project in (alpha, beta, gamma):
         page = project_page(run_, project)
         body = main_of(page)
         root = str(project.resolve())
-        assert f"<h1>{project.name}</h1>" in body
+        assert (f'<div class="project-name"><h1>{project.name}</h1>'
+                f'<span class="path">{html.escape(root, quote=False)}</span></div>') in body
         assert body.count("<h1>") == 1
-        assert ('<div class="root"><span class="label">Project</span>'
-                f"<code>{html.escape(root, quote=False)}</code></div>") in body
-        assert body.index("<h1>") < body.index('<div class="root">')
         assert text_of(without_commands(page)).count(root) == 1, project.name
-        # The lede, the caption and the one-row table are gone with
-        # their constants.
-        assert "<table" not in body
+        # No plan table and no lede on this screen.
+        assert '<table class="plan' not in body
         assert '<p class="lede">' not in body
         for gone in ("PROJECT_HEAD", "PROJECT_LEDE", "PROJECT_CAPTION",
                      "ACTIONS_HEAD", "NOTHING_TO_DO", "PROJECT_COLUMNS"):
@@ -1105,12 +1248,13 @@ def test_the_project_page_leads_with_the_name_and_says_the_path_once(
     assert run_.running
 
 
-def test_the_projects_control_stands_top_and_bottom_and_lands_on_the_row(
+def test_the_way_back_stands_above_the_name_and_lands_on_the_row(
     tmp_path, env, client_here, command, capsys, manage,
 ):
-    """Prescription 2: "Projects" above the heading and after the last
-    section, both forms to the listing, whose action names the row this
-    page was opened from by the id the listing row carries."""
+    """Prescription 5: "← Projects" above the name, a form to the list
+    whose action names the row this screen was opened from by the id that
+    row carries. The redesign keeps one way back, at the top; the second
+    control the old page drew after its last section is gone."""
     alpha, beta, gamma = three_projects(tmp_path, capsys, client_here)
     run_ = manage()
     listing = run_.page()
@@ -1118,226 +1262,178 @@ def test_the_projects_control_stands_top_and_bottom_and_lands_on_the_row(
         root = str(project.resolve())
         row_id = manage_web._row_id(root)
         assert re.fullmatch(r"row-[0-9a-f]{12}", row_id)
-        assert main_of(listing).count(f'<tr id="{row_id}">') == 1
+        assert main_of(listing).count(f'<li class="roster-row" id="{row_id}">') == 1
         page = project_page(run_, project)
         body = main_of(page)
-        controls = projects_controls(page)
-        assert controls == [f"{PATH}#{row_id}", f"{PATH}#{row_id}"], project.name
-        # The first is the page's first control, above the heading; the
-        # last is the page's last, after everything else.
-        top = body.index('<div class="topbar">')
-        assert top < body.index("<h1>")
-        assert body.index("<form", top) < body.index("<h1>")
-        bottom = body.rindex('<div class="bottombar">')
-        assert bottom > body.rindex("</section>")
-        assert body.rstrip().endswith("</form></div>")
-        assert body.count(f'#{row_id}"') == 2
+        assert back_links(page) == [f"{PATH}#{row_id}"], project.name
+        assert (f'<button class="link back" type="submit"><span aria-hidden="true">'
+                f"{manage_web.GLYPH_BACK}</span>{manage_web.ROSTER_HEAD}</button>") in body
+        assert body.index('<button class="link back"') < body.index("<h1>")
+        assert body.count(f'#{row_id}"') == 1
         # Same id from the same root however it is spelled, as far as
-        # this platform folds a spelling: `normcase` folds case on
-        # Windows and nothing on Linux, where two cases are two folders.
+        # this platform folds a spelling.
         assert manage_web._row_id(os.path.normcase(root)) == row_id
         if os.path.normcase("A") == "a":
             assert manage_web._row_id(root.upper()) == row_id
         else:
             assert manage_web._row_id(root.upper()) != row_id
-        # A browser never sends the fragment; the listing answers and the
+        # A browser never sends the fragment; the list answers and the
         # row is on it, with its id, so the fragment has somewhere to land.
         targets = [t for t in navigations(page, run_.session.token)
                    if "view=roster" in t]
-        assert len(targets) == 2
+        assert len(targets) == 1
         assert not any("#" in t for t in targets)
         status, back, _ = run_.get(targets[0])
         assert status == 200
-        assert f'<tr id="{row_id}">' in main_of(back)
-        assert listing_rows(back) == expected_listing(ro.listing())
-    css = (packaged_web() / "page.css").read_text(
-        encoding="utf-8").replace("\r\n", "\n")
-    bar = css.split(".topbar {", 1)[1].split("}", 1)[0]
-    assert "position: sticky" in bar
-    assert "top: 0" in bar
-    assert "background: var(--ground)" in bar
+        assert f'<li class="roster-row" id="{row_id}">' in main_of(back)
+        assert roster_rows(back) == expected_listing(listed())
     assert run_.running
 
 
-def test_the_project_page_has_three_sections_in_order(
+def test_the_project_page_reads_status_skills_connections_then_its_foot(
     tmp_path, env, client_here, command, capsys, manage,
 ):
-    """Prescription 3: Status, Skills, Connections, each a section with
-    its heading; Status says the three facts of constraint 3 as blocks,
-    and a section with nothing to list says so."""
+    """Prescription 5: the status as one sentence with its fix beside it,
+    the skill grid, the Connections row, and Details with the removal at
+    the foot, in that order."""
     alpha, beta, gamma = three_projects(tmp_path, capsys, client_here)
     run_ = manage()
-    assert (manage_web.STATUS_HEAD, manage_web.SKILLS_HEAD,
-            manage_web.CONNECTIONS_HEAD) == ("Status", "Skills", "Connections")
+    assert (manage_web.SKILLS_HEAD, manage_web.CONNECTIONS_HEAD) == ("Skills", "Connections")
+    label = cn.CLIENTS[CLIENT].label
+    expected = {
+        "alpha": [("ok", "RadialRig is working in this project.", "")],
+        "beta": [("repair", f"{label} lost its link to this project.", "Repair")],
+        "gamma": [("new", "RadialRig is not set up in this project.", "Set up")],
+    }
     for project in (alpha, beta, gamma):
         page = project_page(run_, project)
         body = main_of(page)
-        heads = SECTION_HEAD.findall(body)
-        assert heads[:3] == ["Status", "Skills", "Connections"], project.name
-        facts = ro.verify(project.resolve())
-        assert FACT_BLOCK.findall(body) == facts_of(facts), project.name
-        status = body.split(f"<h2>{manage_web.STATUS_HEAD}</h2>", 1)[1] \
-            .split("</section>", 1)[0]
-        assert status.count('<p class="fact ') == len(facts_of(facts)) == 3
+        assert status_band(page) == expected[project.name], project.name
+        order = [body.index(mark) for mark in (
+            '<div class="project-name">', '<div class="status-band">',
+            f'<table class="skill-grid"><thead><tr><th scope="col"><h2>{manage_web.SKILLS_HEAD}</h2></th>',
+            CONNECTIONS, '<div class="project-foot"><details class="settings">')]
+        assert order == sorted(order), project.name
         # The command line's remedy tail, with its placeholders, is on no
-        # page since phase 3: the Status section writes the remedy out.
+        # screen.
         assert report.PROJECTS_MISMATCH_TAIL not in html.unescape(body)
-        if facts.connected == ro.CONNECTED_MISMATCH:
-            assert ro.mismatch_clause(facts) in html.unescape(status)
-            assert '<details class="command">' in status
-        else:
-            assert "<details" not in status
-    # The unmounted project opens its Status with the word for it.
-    assert '<p class="fact mounted">Not mounted</p>' in project_page(run_, gamma)
-    # The mismatched project's Connections section is the repair's row,
-    # since the record's client is detected here (phase 3): its label,
-    # the repair sentence, and the one press.
-    mismatch = main_of(project_page(run_, beta))
-    connections = mismatch.split(f"<h2>{manage_web.CONNECTIONS_HEAD}</h2>", 1)[1] \
-        .split("</section>", 1)[0]
-    assert manage_web.CONNECTIONS_NONE not in connections
-    assert connections.count("<h3") == 1
     assert run_.running
 
 
-def test_a_name_and_its_sentence_are_separated_by_a_block_boundary(
+def test_a_skill_name_and_its_line_are_separate_blocks(
     tmp_path, env, client_here, command, capsys, manage,
 ):
-    """Prescription 3, on the raw markup: every name on the page is a
-    heading element, and what follows it is a block, never an inline
-    span, so the accessibility text keeps a word between them."""
+    """Each grid row names its skill once, then its one line from the
+    catalog, in two elements the stylesheet lays out as blocks (a flex
+    container's children), so the accessibility text keeps a word between
+    them. The skill names come from the catalog in its order; the column
+    heads are the agents' labels from the map."""
     alpha, beta, gamma = three_projects(tmp_path, capsys, client_here)
     run_ = manage()
     for project in (alpha, beta, gamma):
-        body = main_of(project_page(run_, project))
-        heads = ROW_HEAD.findall(body)
-        assert heads, project.name
-        # One skill row per catalog skill per agent (PLAN-0015 phase 2),
-        # one client row on a registered project, and one on a mismatched
-        # one whose client is detected here: the repair's (phase 3).
-        expected = len(sk.catalog_names()) * len(sk.HARNESSES) + (
-            1 if ro.verify(project.resolve()).connected in (
-                CLIENT, ro.CONNECTED_MISMATCH) else 0)
-        assert body.count("<h3 ") == expected == len(heads)
-        for kind, name, following in heads:
-            assert following == "<p", (name, following)
-            assert f'<h3 class="{kind}">{name}</h3><p' in body
-        assert '</span><span class="what">' not in body
-        assert '<span class="name">' not in body
-        # The skill names in mono, the client's label not. The agent's
-        # label heads its list as a caption, never as a row heading.
-        assert [name for kind, name, _ in heads if kind == "name"] == \
-            list(sk.catalog_names()) * len(sk.HARNESSES)
-        assert [label for label, _ in agent_lists(body)] == \
-            [h.label for h in sk.HARNESSES.values()]
-        for kind, name, _ in heads:
-            if kind == "label":
-                assert name == cn.CLIENTS[CLIENT].label
+        grid = grid_of(project_page(run_, project))
+        found = GRID_ROW.findall(grid)
+        assert [name for _, name, _, _ in found] == list(sk.catalog_names()), project.name
+        for _, name, said, _ in found:
+            assert html.unescape(said) == sk.catalog_entry(name).summary
+        assert [label for label, _ in AGENT_HEAD.findall(grid)] == [
+            h.label for h in sk.HARNESSES.values()]
     css = (packaged_web() / "page.css").read_text(
         encoding="utf-8").replace("\r\n", "\n")
-    assert "Cascadia Mono" in css.split(".row h3.name {", 1)[1].split("}", 1)[0]
+    assert ".screen .skill-info { display: flex;" in css
     assert run_.running
 
 
 def test_every_press_names_its_target(
     tmp_path, env, client_here, command, capsys, manage,
 ):
-    """Prescription 4: each label is a template with a slot, filled from
-    the catalog or the client table; each row says the skill's purpose
-    from the catalog and its state, and offers one press."""
-    import dataclasses as dc
-
+    """Every button on the screen is read by a name that says what it
+    acts on: each cell its skill and agent, each Add all its agent,
+    Connect and Disconnect the client. The names are templates with a
+    slot, filled from the catalog, the harness map or the client table.
+    Every cell runs on its one press, posting `confirm` and `from`."""
     alpha, beta, gamma = three_projects(tmp_path, capsys, client_here)
     run_ = manage()
     label = cn.CLIENTS[CLIENT].label
-    assert manage_web.UNMOUNT_LABEL == "Unmount this project"
-    assert (manage_web.SKILL_ADD_LABEL, manage_web.SKILL_REMOVE_LABEL,
-            manage_web.CONNECT_LABEL, manage_web.UNCONNECT_LABEL) == (
-        "Add {name}", "Remove {name}", "Connect {label}", "Disconnect {label}")
-    assert manage_web.SKILL_ADD_ALL_LABEL == "Add all for {label}"
+    assert (manage_web.CELL_NAME, manage_web.CELL_UPDATE_NAME, manage_web.ADD_ALL_NAME,
+            manage_web.CONNECT_LABEL, manage_web.UNCONNECT_LABEL,
+            manage_web.RETIRED_NAME) == (
+        "{skill} for {agent}", "Update {skill} for {agent}", "Add all skills for {agent}",
+        "Connect {label}", "Disconnect {label}", "Remove {skill} for {agent}")
     for project in (alpha, beta, gamma):
         page = project_page(run_, project)
-        body = main_of(page)
         facts = ro.verify(project.resolve())
-        presses = [GHOST.search(inner).group(1) for inner in POST_PRESS.findall(body)]
-        # One list per agent (PLAN-0015 phase 2): the whole-catalog press
-        # above a list with a skill missing, then one press per row.
-        wanted = []
-        for agent, names in facts.agents:
-            missing = [name for name in sk.catalog_names() if name not in names]
-            if missing:
-                wanted.append(f"Add all for {sk.HARNESSES[agent].label}")
+        cells, presses = grid_cells(page), grid_presses(page)
+        for (agent, names) in facts.agents:
+            harness = sk.HARNESSES[agent]
             for name in sk.catalog_names():
-                wanted.append(f"Remove {name}" if name in names else f"Add {name}")
+                on = name in names
+                assert cells[(name, harness.label)] == (
+                    ("on", "On") if on else ("off", "Off")), (project.name, name)
+                assert presses[(name, harness.label)] == {
+                    "action": manage_web.SKILL_REMOVE if on else manage_web.SKILL_ADD,
+                    "root": str(project.resolve()), "skill": name, "harness": agent,
+                    "confirm": "yes", "from": manage_web.PROJECT}
+                grid = grid_of(page)
+                assert (f'aria-label="{name} for {harness.label}" '
+                        f'aria-pressed="{"true" if on else "false"}"') in grid
+        heads = agent_heads(page)
+        for (agent, names) in facts.agents:
+            harness = sk.HARNESSES[agent]
+            if len(names) < len(sk.catalog_names()):
+                assert heads[harness.label] == {
+                    "action": manage_web.SKILL_ADD_ALL, "root": str(project.resolve()),
+                    "harness": agent, "confirm": "yes", "from": manage_web.PROJECT}
+                assert f'aria-label="Add all skills for {harness.label}"' in grid_of(page)
+            else:
+                assert heads[harness.label] is None
+        connections = connections_of(page)
         if facts.connected == CLIENT:
-            wanted.append(f"Disconnect {label}")
-        if facts.connected == ro.CONNECTED_MISMATCH:
-            wanted.append(f"Repair the {label} connection")   # phase 3
-        if facts.mounted:
-            wanted.append(manage_web.UNMOUNT_LABEL)
-        assert presses == wanted, project.name
-        assert "Add it" not in body and "Remove it" not in body
-        assert "Register it" not in body and "Remove the entries" not in body
-        # Each skill row, in each agent's list: the catalog's one-line
-        # purpose, then its state for that agent.
-        for (agent, names), (heading, inner) in zip(facts.agents, agent_lists(body)):
-            assert heading == sk.HARNESSES[agent].label
-            for name in sk.catalog_names():
-                entry = sk.catalog_entry(name)
-                state = (manage_web.SKILL_INSTALLED if name in names
-                         else manage_web.SKILL_NOT_INSTALLED)
-                assert (f'<h3 class="name">{name}</h3>'
-                        f'<p class="what">{html.escape(entry.summary, quote=False)}</p>'
-                        f'<p class="state">{state}</p>') in inner, (agent, name)
-        if facts.connected == CLIENT:
-            assert (f'<h3 class="label">{label}</h3>'
-                    f'<p class="state">{manage_web.CONNECTED_STATE}</p>') in body
-    # The healthy project carries the one skill the fixture installed,
-    # for every agent, so it reads Installed once per list.
-    assert manage_web.SKILL_INSTALLED == "Installed"
-    assert main_of(project_page(run_, alpha)).count(
-        f'<p class="state">{manage_web.SKILL_INSTALLED}</p>') == len(sk.HARNESSES)
-    # A skill one agent's record lists that the catalog does not carry
-    # still gets a row in that agent's list: its state, no purpose, and
-    # its removal for that agent alone.
+            assert f'aria-label="Disconnect {label}"' in connections
+        assert f'aria-label="Connect {label}"' not in connections
+    # A skill a record still lists that the package no longer ships gets
+    # its own row, with Remove under the agent that still has it.
     first = next(iter(sk.HARNESSES.values()))
-    verified = ro.verify(alpha.resolve())
-    alpha_state = dc.replace(
-        verified, skills=("bygone", SKILL),
-        agents=tuple((agent, ("bygone", SKILL) if agent == first.name else names)
-                     for agent, names in verified.agents))
-    page_state = setup_web.PageState(
-        manage_web.PROJECT, report.OK, False, result=alpha_state,
-        catalog=sk.states_all(alpha.resolve()))
-    rows_ = manage_web._skill_rows(run_.session, page_state, first)
-    assert len(rows_) == len(sk.catalog_names()) + 1
-    assert ('<h3 class="name">bygone</h3>'
-            f'<p class="state">{manage_web.SKILL_INSTALLED}</p>') in rows_[-1]
-    assert "Remove bygone" in rows_[-1]
-    assert f'name="harness" value="{first.name}"' in rows_[-1]
-    assert '<p class="what">' not in rows_[-1]
+    retire_a_skill(alpha.resolve(), first, SKILL, "lap-checklist")
+    page = project_page(run_, alpha)
+    cells = grid_cells(page)
+    assert cells[("lap-checklist", first.label)] == ("remove", "Remove")
     for other in list(sk.HARNESSES.values())[1:]:
-        assert "bygone" not in "".join(
-            manage_web._skill_rows(run_.session, page_state, other))
-    # The orphan block on the listing names its target too.
-    assert manage_web.ORPHAN_LABEL == "Remove {key}"
+        assert cells[("lap-checklist", other.label)] == ("", "")
+    assert grid_presses(page)[("lap-checklist", first.label)] == {
+        "action": manage_web.SKILL_REMOVE, "root": str(alpha.resolve()),
+        "skill": "lap-checklist", "harness": first.name,
+        "confirm": "yes", "from": manage_web.PROJECT}
+    assert f'aria-label="Remove lap-checklist for {first.label}"' in grid_of(page)
+    assert f"<small>{manage_web.RETIRED_SAID}</small>" in grid_of(page)
     assert run_.running
 
 
-def test_the_skills_are_two_lists_and_add_all_fills_one_agents(
+def retire_a_skill(root: Path, harness, source: str, retired: str) -> None:
+    """Make one agent's record list a skill this package no longer ships:
+    a copy of an installed skill under a name the catalog doesn't have."""
+    record_path = root / harness.record
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    template = next(e for e in record["skills"] if e["name"] == source)
+    clone = json.loads(json.dumps(template).replace(f"/{source}/", f"/{retired}/")
+                       .replace(f'"{source}"', f'"{retired}"'))
+    record["skills"].append(clone)
+    record_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    shutil.copytree(root / harness.skills / source, root / harness.skills / retired)
+
+
+def test_the_grid_has_a_column_per_agent_and_add_all_fills_one(
     tmp_path, env, client_here, command, capsys, manage,
 ):
-    """PLAN-0015 phase 2's done-condition, on the page.
+    """PLAN-0015 phase 2's done-condition, on the redesigned grid.
 
-    A project with the one skill installed for the first agent only, and
-    every skill for that agent once its whole-catalog press has run: the
-    skill reads Installed with Remove under that agent's label and Not
-    installed with Add under the other's; "Add all for <label>" stands
-    above the other's rows and not above the first's; pressing it
-    previews one head line for that agent and the created paths once,
-    and after Run its list reads Installed on every row and the press is
-    gone. The Status fact reads per agent while the lists differ and as
-    one count when they match. No sentence about a split anywhere.
+    A project with every skill for the first agent and none for the
+    second: the first column reads On on every row and has no Add all;
+    the second reads Off with Add all in its head. Every press in a
+    column names that column's agent, and its command narrows to it.
+    The two-step press still rehearses first and writes nothing; Add all
+    on its one press fills the second column, and Add all is gone.
+    Nothing on the screen says "harness" outside a command line.
     """
     alpha, _, _ = three_projects(tmp_path, capsys, client_here)
     first, second = list(sk.HARNESSES.values())[:2]
@@ -1348,105 +1444,63 @@ def test_the_skills_are_two_lists_and_add_all_fills_one_agents(
     run_ = manage()
 
     page = project_page(run_, alpha)
-    body = main_of(page)
-    lists = dict(agent_lists(body))
-    assert list(lists) == [h.label for h in sk.HARNESSES.values()]
-    assert (f'<h3 class="name">{SKILL}</h3>'
-            f'<p class="what">{html.escape(sk.catalog_entry(SKILL).summary, quote=False)}</p>'
-            f'<p class="state">{manage_web.SKILL_INSTALLED}</p>') in lists[first.label]
-    assert (f'<h3 class="name">{SKILL}</h3>'
-            f'<p class="what">{html.escape(sk.catalog_entry(SKILL).summary, quote=False)}</p>'
-            f'<p class="state">{manage_web.SKILL_NOT_INSTALLED}</p>') in lists[second.label]
-    assert f"Remove {SKILL}" in lists[first.label] and f"Add {SKILL}" not in lists[first.label]
-    assert f"Add {SKILL}" in lists[second.label] and f"Remove {SKILL}" not in lists[second.label]
-    assert lists[first.label].count('<p class="state">') == len(sk.catalog_names())
-    assert lists[first.label].count(f'<p class="state">{manage_web.SKILL_INSTALLED}</p>') \
-        == len(sk.catalog_names())
-    assert lists[second.label].count(
-        f'<p class="state">{manage_web.SKILL_NOT_INSTALLED}</p>') == len(sk.catalog_names())
-    # Every row's press names its agent, and its command narrows to it.
-    for label, inner in lists.items():
+    cells = grid_cells(page)
+    for name in sk.catalog_names():
+        assert cells[(name, first.label)] == ("on", "On")
+        assert cells[(name, second.label)] == ("off", "Off")
+    for (name, label), fields in grid_presses(page).items():
         harness = next(h for h in sk.HARNESSES.values() if h.label == label)
-        for press in POST_PRESS.findall(inner):
-            assert dict(HIDDEN.findall(press))["harness"] == harness.name
-        for copied in re.findall(r'data-copy="([^"]*)"', inner):
-            assert html.unescape(copied).endswith(f" --harness {harness.name}"), copied
-    # The whole-catalog press: above the second agent's rows, its own
-    # command behind the disclosure, and none above the first's.
-    add_all = f"Add all for {second.label}"
-    assert add_all in lists[second.label]
-    assert f"Add all for {first.label}" not in body
-    assert lists[second.label].index(add_all) < lists[second.label].index('<ul class="rows">')
-    assert "Add all for" not in lists[first.label]
+        assert fields["harness"] == harness.name
+    for shown, copied, _ in COPY_LINE.findall(grid_of(page)):
+        line = html.unescape(copied)
+        if line.startswith("radialrig skill "):
+            assert line.endswith((f" --harness {first.name}", f" --harness {second.name}")), line
+    heads = agent_heads(page)
+    assert heads[first.label] is None
+    assert heads[second.label] == {"action": manage_web.SKILL_ADD_ALL, "root": root,
+                                   "harness": second.name, "confirm": "yes",
+                                   "from": manage_web.PROJECT}
     act = manage_web.Action(manage_web.SKILL_ADD_ALL, root=root, harness=second.name)
     assert act.command == f"radialrig skill add --all {root} --harness {second.name}"
-    assert f'data-copy="{html.escape(act.command, quote=True)}"' in lists[second.label]
-    # The Status fact, per agent while the lists differ.
-    facts = ro.verify(alpha.resolve())
-    assert not ro.agents_agree(facts)
-    assert FACT_BLOCK.findall(body) == facts_of(facts)
-    assert [said for which, said in FACT_BLOCK.findall(body) if which == "skills"] == [
-        f"{first.label}: {len(sk.catalog_names())} skills", f"{second.label}: no skills"]
-    # Nothing on the page says "harness" outside a command line, where
-    # `--harness` is the flag's own name; the labels come from the map.
+    assert f'data-copy="{html.escape(act.command, quote=True)}"' in grid_of(page)
     assert "harness" not in text_of(without_commands(page)).lower()
-    # The press, as the page drew it: the rehearsal first.
-    press = next(dict(HIDDEN.findall(inner)) for inner in POST_PRESS.findall(body)
-                 if add_all in inner)
-    press.pop("token")
-    assert press == {"action": manage_web.SKILL_ADD_ALL, "root": root,
-                     "harness": second.name}
+
+    # The two-step press: the rehearsal first, which writes nothing, and
+    # one head line for the press naming every skill it writes.
+    press = {"action": manage_web.SKILL_ADD_ALL, "root": root, "harness": second.name}
     before = ro.verify(alpha.resolve())
     plan = pressed(run_, press)
     assert ro.verify(alpha.resolve()) == before, "the rehearsal wrote something"
-    # One head line for the press, naming every skill it writes and the
-    # agent once; no per-skill head beneath the table repeats the root,
-    # and nothing on the page says "harness".
     head = re.search(r"<h1>([^<]*)</h1>", main_of(plan)).group(1)
-    missing = [entry for entry in sk.SKILL_CATALOG]
     assert head == html.escape(
-        f"Would add {report._joined(f'{e.name} {e.version}' for e in missing)} "
+        f"Would add {report._joined(f'{e.name} {e.version}' for e in sk.SKILL_CATALOG)} "
         f"for {second.label} to {root}", quote=False)
     assert text_of(plan).count("Would add ") == 1
-    assert text_of(without_commands(plan)).count(root) == 1
     assert first.label not in text_of(plan)
-    assert "harness" not in text_of(without_commands(plan)).lower()
     drawn = rows(plan)
     created = [path for verb, path, _ in drawn if verb == mnt.CREATED]
     assert created and len(set(created)) == len(created)
     for entry in sk.SKILL_CATALOG:
         for rel in entry.files:
             assert f"{second.skills}/{entry.name}/{rel}" in created
-    assert first.skills not in text_of(plan)
-    # Constraint 4: the paths stand in the table and nowhere beneath it.
     for line in said_lines(plan):
         for path in created:
             assert path not in line, (line, path)
     assert main_of(plan).count(PRIMARY) == 1
-    # Then the run.
-    done = pressed(run_, press, confirm=True)
-    assert manage_web.DONE_CAPTION in text_of(done)
-    assert report.SKILL_NEXT_STEP in text_of(done)
-    assert "harness" not in text_of(without_commands(done)).lower()
-    assert re.search(r"<h1>([^<]*)</h1>", main_of(done)).group(1).startswith("Added ")
-    assert text_of(done).count("Added ") == 1
-    for line in said_lines(done):
-        for path in created:
-            assert path not in line, (line, path)
+
+    # The one press, as the grid drew it.
+    done = pressed(run_, heads[second.label])
+    assert result_of(done)[:2] == (
+        manage_web.RESULT_DONE,
+        f"Added all skills for {second.label}. Start a new agent session to pick them up.")
     after = ro.verify(alpha.resolve())
     assert after.skills == tuple(sorted(sk.catalog_names()))
     assert ro.agents_agree(after)
-    # And the page, with every row Installed in both lists and the
-    # press gone, and the Status fact one count again.
-    page = project_page(run_, alpha)
-    body = main_of(page)
-    for label, inner in agent_lists(body):
-        assert inner.count(f'<p class="state">{manage_web.SKILL_INSTALLED}</p>') \
-            == len(sk.catalog_names()), label
-        assert manage_web.SKILL_NOT_INSTALLED not in inner
-    assert "Add all for" not in body
-    assert [said for which, said in FACT_BLOCK.findall(body) if which == "skills"] == [
-        f"{len(sk.catalog_names())} skills"]
+    cells = grid_cells(done)
+    assert {cells[(name, label)] for name in sk.catalog_names()
+            for label in (first.label, second.label)} == {("on", "On")}
+    assert agent_heads(done) == {first.label: None, second.label: None}
+    assert "harness" not in text_of(without_commands(done)).lower()
     assert run_.running
 
 
@@ -1454,11 +1508,11 @@ def test_add_all_speaks_for_the_press_when_the_first_catalog_skill_stands(
     tmp_path, env, client_here, command, capsys, manage,
 ):
     """The whole-catalog press on a project where the catalog's first
-    skill is already installed for that agent. The page's head names the
-    skills the press writes, never "Already installed" for the one it
-    does not touch; that skill's rows are not in the table, and the
-    outcome is the write's, not a no-op's. After Run, the same head
-    with the past verb, and the list reads Installed on every row.
+    skill is already installed for that agent. Today's plan page's head
+    names the skills the press writes, never "Already installed" for the
+    one it does not touch; that skill's rows are not in the table, and the
+    outcome is the write's, not a no-op's. After Run, the same head with
+    the past verb, and the grid reads On down that agent's column.
     """
     alpha, _, _ = three_projects(tmp_path, capsys, client_here)
     first, second = list(sk.HARNESSES.values())[:2]
@@ -1495,10 +1549,10 @@ def test_add_all_speaks_for_the_press_when_the_first_catalog_skill_stands(
                     f"for {second.label} to {root}")
     assert "Already installed" not in text_of(done)
     assert all(verb != mnt.CURRENT for verb, _, _ in rows(done))
-    lists = dict(agent_lists(main_of(project_page(run_, alpha))))
-    assert lists[second.label].count(f'<p class="state">{manage_web.SKILL_INSTALLED}</p>') \
-        == len(sk.catalog_names())
-    assert f"Add all for {second.label}" not in lists[second.label]
+    page = project_page(run_, alpha)
+    assert {grid_cells(page)[(name, second.label)] for name in sk.catalog_names()} == {
+        ("on", "On")}
+    assert agent_heads(page)[second.label] is None
     # A press that finds every skill standing says so in one head, with
     # the current tail, and writes nothing.
     again = pressed(run_, press)
@@ -1508,16 +1562,15 @@ def test_add_all_speaks_for_the_press_when_the_first_catalog_skill_stands(
     assert not rows(again)
 
 
-def test_add_all_is_withheld_while_a_row_in_that_list_is_blocked(
+def test_add_all_is_withheld_while_a_cell_in_that_column_is_blocked(
     tmp_path, env, client_here, command, capsys, manage,
 ):
-    """A list with a row the engine would refuse — a directory of the
-    project's own at a skill's target — shows that row's reason and no
-    press on it, as prescription 1 says; the whole-catalog press above
-    the list is withheld too, because the engine composes every skill
-    and refuses whole, so the press could only ever refuse. The other
-    agent's list, with nothing blocked, keeps its press, and the rows
-    still add the unblocked skills one by one.
+    """A column with a cell the engine would refuse — a folder of the
+    project's own at a skill's target — shows that cell's reason and no
+    button; the column's Add all is withheld too, because the engine
+    composes every skill and refuses whole, so the press could only ever
+    refuse. The other agent's column, with nothing blocked, keeps its Add
+    all, and the cells still add the unblocked skills one by one.
     """
     alpha, _, _ = three_projects(tmp_path, capsys, client_here)
     first, second = list(sk.HARNESSES.values())[:2]
@@ -1527,25 +1580,58 @@ def test_add_all_is_withheld_while_a_row_in_that_list_is_blocked(
     (root / second.skills / other / "ours.md").write_bytes(b"our own skill\n")
     run_ = manage()
 
-    lists = dict(agent_lists(main_of(project_page(run_, alpha))))
-    reason = mnt.REASONS[mnt.SKILL_DIR_FOREIGN]
-    assert reason in lists[second.label] and reason not in lists[first.label]
-    assert f"Add all for {second.label}" not in lists[second.label]
-    assert f"Add all for {first.label}" in lists[first.label]
-    assert f"Add {other}" not in lists[second.label]
+    page = project_page(run_, alpha)
+    cells = grid_cells(page)
+    assert manage_web.CELL_REASONS[manage_web.CELL_FOREIGN] == "Has a folder RadialRig didn't add"
+    assert cells[(other, second.label)] == ("note", "Has a folder RadialRig didn't add")
+    assert cells[(other, first.label)] == ("off", "Off")
+    assert agent_heads(page)[second.label] is None
+    assert agent_heads(page)[first.label] is not None
     third = next(name for name in sk.catalog_names() if name not in (SKILL, other))
-    assert f"Add {third}" in lists[second.label]
-    # The engine's own answer to the press the page withheld is the
-    # refusal, which is why the page does not offer it.
+    assert cells[(third, second.label)] == ("off", "Off")
+    assert (other, second.label) not in grid_presses(page)
+    # The engine's own answer to the press the screen withheld is the
+    # refusal, which is why the screen does not offer it.
     act = manage_web.Action(manage_web.SKILL_ADD_ALL, root=str(root), harness=second.name)
     assert manage_web._skill_add_all(act, dry_run=True).kind == manage_web.REFUSED
     assert cli.main(["skill", "add", "--all", str(root), "--harness", second.name,
                      "--dry-run"]) == report.REFUSED
     capsys.readouterr()
-    # Once the directory is out of the way, the press is back.
+    # Once the folder is out of the way, Add all is back.
     shutil.rmtree(root / second.skills / other)
-    lists = dict(agent_lists(main_of(project_page(run_, alpha))))
-    assert f"Add all for {second.label}" in lists[second.label]
+    assert agent_heads(project_page(run_, alpha))[second.label] is not None
+
+
+def test_a_file_where_the_skills_folder_goes_blocks_the_whole_column(
+    tmp_path, env, client_here, command, capsys, manage,
+):
+    """A file of the project's own where an agent's skills folder goes
+    blocks every skill for that agent, as the engine refuses each one: the
+    column's cells say why and carry no button, and its Add all is
+    withheld (actions.md row 16; phase 1 review A2)."""
+    first, second = list(sk.HARNESSES.values())[:2]
+    root = _make_project(tmp_path / "alpha").resolve()
+    assert run(capsys, "mount", str(root))[0] == 0
+    skills = root / first.skills
+    skills.parent.mkdir(parents=True, exist_ok=True)
+    skills.write_bytes(b"not a folder\n")
+    run_ = manage()
+
+    page = project_page(run_, root)
+    cells = grid_cells(page)
+    for name in sk.catalog_names():
+        assert cells[(name, first.label)] == ("note", "A file is in the way"), name
+        assert cells[(name, second.label)] == ("off", "Off"), name
+    assert agent_heads(page)[first.label] is None
+    assert agent_heads(page)[second.label] is not None
+    assert not any(label == first.label for _, label in grid_presses(page))
+    # Each press the column withholds is one the engine refuses.
+    for name in sk.catalog_names():
+        act = manage_web.Action(manage_web.SKILL_ADD, root=str(root), skill=name,
+                                harness=first.name)
+        assert manage_web._skill_add(act, dry_run=True).kind == manage_web.REFUSED, name
+    act = manage_web.Action(manage_web.SKILL_ADD_ALL, root=str(root), harness=first.name)
+    assert manage_web._skill_add_all(act, dry_run=True).kind == manage_web.REFUSED
 
 
 def test_no_skill_press_prints_a_path_twice(
@@ -1601,74 +1687,66 @@ def test_no_skill_press_prints_a_path_twice(
     assert run_.running
 
 
-def test_the_command_sits_behind_a_disclosure_with_its_copy_button_named(
+def test_every_command_stands_under_show_commands_with_its_copy_named(
     tmp_path, env, client_here, command, capsys, manage,
 ):
-    """Prescription 5, and prescription 4's Copy button: every command on
-    the project page is inside a native disclosure reading "Show
-    command", with the Copy button inside it, named for its command.
-
-    On the mismatched project (phase 3) one disclosure holds two frames:
-    the remedy's, under the Status facts, and the repair press in the
-    Connections section runs those two commands rather than carrying a
-    second copy of them beside it."""
+    """Every command a press on the screen runs stands under the screen's
+    one Show commands switch, in Details, in the order the press runs
+    them, each with a Copy button named for its command (actions.md row
+    24). Repair's are its two verbs, the removal then the fresh connect."""
     alpha, beta, gamma = three_projects(tmp_path, capsys, client_here)
     run_ = manage()
-    assert manage_web.SHOW_COMMAND == "Show command"
+    assert manage_web.SHOW_COMMANDS == "Show commands"
     for project in (alpha, beta, gamma):
         page = project_page(run_, project)
         body = main_of(page)
-        mismatched = ro.verify(project.resolve()).connected == ro.CONNECTED_MISMATCH
-        disclosed = DISCLOSED.findall(body)
-        presses = POST_PRESS.findall(body)
-        # One single-command disclosure per single-verb press; on the
-        # mismatched project the repair press is the one press without
-        # its own, and the remedy's disclosure stands in its place.
-        singles = len(presses) - (1 if mismatched else 0)
-        assert len(disclosed) == singles > 0, project.name
-        assert body.count("<details") == len(presses)
-        assert body.count('<details class="command">') == len(presses)
-        frames = singles + (2 if mismatched else 0)
-        assert len(COPY_BUTTON.findall(body)) == frames
-        assert body.count('<div class="cmd">') == frames
-        assert body.count(f"<summary>{manage_web.SHOW_COMMAND}</summary>") == len(presses)
-        for summary, shown, copied, named in disclosed:
-            assert summary == manage_web.SHOW_COMMAND
-            assert html.unescape(shown) == html.unescape(copied)
-            assert html.unescape(named) == manage_web.COPY_NAME.format(
-                command=html.unescape(copied))
-            assert html.unescape(copied).startswith("radialrig ")
-        # Every press's command is the one its own fields name; the
-        # repair's are the two verbs it runs, in order.
-        for inner in presses:
+        assert body.count(SHOW_COMMANDS_BOX) == 1, project.name
+        details = body.split('<details class="settings">', 1)[1].split("</details>", 1)[0]
+        assert SHOW_COMMANDS_BOX in details
+        copied = []
+        for shown, copy, named in COPY_LINE.findall(body):
+            line = html.unescape(copy)
+            assert html.unescape(shown) == line
+            assert html.unescape(named) == manage_web.COPY_NAME.format(command=line)
+            assert line.startswith("radialrig ")
+            copied.append(line)
+        assert copied, project.name
+        # Every press's command is the one its own fields name; Repair's
+        # are the two verbs it runs, in order.
+        for inner in POST_PRESS.findall(body):
             fields = dict(HIDDEN.findall(inner))
             if fields["action"] == manage_web.REPAIR:
                 acts = manage_web.repair_steps(ro.verify(project.resolve()))
-                assert [act.name for act in acts] == [
-                    manage_web.UNCONNECT, manage_web.CONNECT]
+                assert [act.name for act in acts] == [manage_web.UNCONNECT, manage_web.CONNECT]
+                assert repair_commands_in(page) == [act.command for act in acts]
+            elif fields["action"] == manage_web.REVERSAL:
+                # The removal's, under the foot: every verb it runs, in order.
+                acts = manage_web.reversal_steps(ro.verify(project.resolve()))
+                foot = body.split('<div class="project-foot">', 1)[1]
+                assert [html.unescape(copy) for _, copy, _ in COPY_LINE.findall(foot)] == [
+                    act.command for act in acts]
             else:
-                acts = (manage_web.Action(
+                act = manage_web.Action(
                     fields["action"], root=fields.get("root", ""),
                     skill=fields.get("skill", ""), client=fields.get("client", ""),
-                    harness=fields.get("harness", "")),)
-            for act in acts:
-                assert f'data-copy="{html.escape(act.command, quote=True)}"' in body
-    js = (packaged_web() / "page.js").read_text(encoding="utf-8")
-    assert "button.textContent" in js
-    assert "aria-label" not in js
+                    harness=fields.get("harness", ""))
+                assert act.command in copied, act.command
     css = (packaged_web() / "page.css").read_text(
         encoding="utf-8").replace("\r\n", "\n")
-    assert "max-width: none" in css.split(
-        "details.command .cmd {", 1)[1].split("}", 1)[0]
-    assert re.search(r"^\.cmd \{", css, re.M)
-    assert ".steps .cmd" not in css
+    assert ".screen .commands { display: none; }" in css
+    # Only from a box in no closed Details (PLAN-0027 phase 5 review P4).
+    assert (".screen:has(.show-commands:checked:not(details:not([open]) *)) "
+            ".commands { display: block; }") in css
+    assert ".screen:has(.show-commands:checked) .commands" not in css
+    js = (packaged_web() / "page.js").read_text(encoding="utf-8")
+    assert "button.textContent" in js
     assert run_.running
 
 
 def test_the_plan_confirm_and_report_pages_keep_the_command_in_full(
     tmp_path, env, client_here, command, capsys, manage,
 ):
-    """Constraint 1: the disclosure is the project page's alone. A press's
+    """Constraint 1: the switch is the redesigned screens' alone. A press's
     plan step, the confirm under it, and the report carry the command
     frame whole, and the Copy button keeps its name there too."""
     alpha, beta, gamma = three_projects(tmp_path, capsys, client_here)
@@ -1684,84 +1762,83 @@ def test_the_plan_confirm_and_report_pages_keep_the_command_in_full(
     for name, page in (("plan", plan), ("done", done)):
         body = main_of(page)
         assert "<details" not in body, name
-        assert manage_web.SHOW_COMMAND not in text_of(page), name
+        assert manage_web.SHOW_COMMANDS not in text_of(page), name
         assert body.count(frame) == 1, name
     assert main_of(plan).count(PRIMARY) == 1
     assert main_of(done).count(PRIMARY) == 0
-    # The removal view names each step by the same label the project
-    # page's press carries, its slot filled, beside its whole command.
-    removal = view(run_, manage_web.REMOVAL)
-    body = main_of(removal)
-    assert "<details" not in body
-    assert '<span class="what">Remove plan-review</span>' in body
-    assert f'<span class="what">Disconnect {cn.CLIENTS[CLIENT].label}</span>' in body
-    assert f'<span class="what">{manage_web.UNMOUNT_LABEL}</span>' in body
+    # Confirm a big change keeps every command its press runs whole, in
+    # order, each with its named Copy, behind Details and the switch.
+    card = pressed(run_, {"action": manage_web.REVERSAL, "root": root,
+                          "from": manage_web.PROJECT})
+    details = main_of(card).split("<details>", 1)[1].split("</details>", 1)[0]
+    acts = manage_web.reversal_steps(ro.verify(alpha.resolve()))
+    assert [html.unescape(c) for _, c, _ in COPY_LINE.findall(details)] == [
+        *(act.command for act in acts), f"radialrig unmount {root}"]
+    for _, line, name in COPY_LINE.findall(details):
+        assert html.unescape(name) == manage_web.COPY_NAME.format(command=html.unescape(line))
+    assert SHOW_COMMANDS_BOX in details
     assert run_.running
 
 
-def test_the_framed_unmount_stands_only_on_a_mounted_project(
+def test_remove_from_this_project_stands_while_radialrig_has_anything_there(
     tmp_path, env, client_here, command, capsys, manage,
 ):
-    """Prescription 6: the unmount leaves the sections and stands framed
-    alone at the page end, a ghost press under one sentence, on a
-    mounted project and on no other; a mounted project's page keeps no
-    amber, and an unmounted one's amber is the mount press (phase 3)."""
+    """Prescription 5: "Remove RadialRig from this project" sits quiet at
+    the foot while RadialRig has files, skills or a connection here, and
+    opens Confirm a big change (PLAN-0027 phase 3): its form names the
+    screen and carries no `confirm`, so it writes nothing. The screen's
+    one amber is its status's fix where it has one. The unmount alone is
+    the card's keep box, not a press of this screen (actions.md row 22)."""
     alpha, beta, gamma = three_projects(tmp_path, capsys, client_here)
+    bare = _make_project(tmp_path / "bare").resolve()
     run_ = manage()
-    for project, mounted in ((alpha, True), (beta, True), (gamma, False)):
+    for project, amber in ((alpha, 0), (beta, 1), (gamma, 1)):
         page = project_page(run_, project)
         body = main_of(page)
-        assert body.count(PRIMARY) == (0 if mounted else 1), project.name
-        assert body.count('<section class="reversal">') == (1 if mounted else 0)
-        assert (manage_web.UNMOUNT_LABEL in body) is mounted, project.name
-        if not mounted:
-            assert f'value="{manage_web.UNMOUNT}"' not in body
-            continue
-        frame = body.split('<section class="reversal">', 1)[1].split("</section>", 1)[0]
-        assert frame.startswith(
-            f"<h2>{manage_web.UNMOUNT_LABEL}</h2>"
-            f"<p>{html.escape(manage_web.UNMOUNT_WHAT, quote=False)}</p>")
-        assert ('<div class="actions"><button class="ghost" type="submit">'
-                f"{manage_web.UNMOUNT_LABEL}</button></div>") in frame
-        assert f'value="{manage_web.UNMOUNT}"' in frame
-        assert body.count(f'value="{manage_web.UNMOUNT}"') == 1
-        assert '<details class="command">' in frame
-        # After the last section, before the bottom control.
-        assert body.index('<section class="reversal">') > body.index(
-            f"<h2>{manage_web.CONNECTIONS_HEAD}</h2>")
-        assert body.index('<section class="reversal">') < body.index(
-            '<div class="bottombar">')
-    assert "your own files" in manage_web.UNMOUNT_WHAT
+        assert body.count(PRIMARY) == amber, project.name
+        assert f'value="{manage_web.UNMOUNT}"' not in body
+        foot = body.split('<div class="project-foot">', 1)[1]
+        press = POST_PRESS.search(foot)
+        assert dict(HIDDEN.findall(press.group(1))) == {
+            "token": run_.session.token, "action": manage_web.REVERSAL,
+            "root": str(project.resolve()), "from": manage_web.PROJECT}
+        assert (f'<button class="link quiet" type="submit">'
+                f"{manage_web.REMOVE_PROJECT_LABEL}</button>") in foot
+    card = pressed(run_, {"action": manage_web.REVERSAL, "root": str(alpha.resolve()),
+                          "from": manage_web.PROJECT})
+    assert f"<h1>Remove RadialRig from {alpha.name}?</h1>" in main_of(card)
+    assert mnt.is_mounted(alpha.resolve()), "the press wrote something"
+    # A folder RadialRig has nothing in shows no removal.
+    assert manage_web.REMOVE_PROJECT_LABEL not in main_of(project_page(run_, bare))
+    assert manage_web.REMOVE_PROJECT_LABEL == "Remove RadialRig from this project"
     assert run_.running
 
 
-def test_the_listing_frame_counts_the_projects_it_would_reverse(
+def test_the_foot_of_projects_holds_the_version_the_log_and_remove_radialrig(
     tmp_path, env, client_here, command, capsys, manage,
 ):
-    """Prescription 6, on the listing: the frame's sentence carries the
-    count of standing projects, and says none where none is listed."""
-    run_ = manage()
-
-    def frame_sentence() -> str:
-        body = main_of(run_.page())
-        frame = body.split('<section class="reversal">', 1)[1]
-        return html.unescape(frame.split("<p>", 1)[1].split("</p>", 1)[0])
-
-    none = manage_web.REMOVAL_WHAT.format(scope=manage_web.REMOVAL_NONE_LISTED)
-    assert frame_sentence() == none
-    assert "none is listed" in none
+    """actions.md rows 4, 9 and 10: the foot of Projects says the engine's
+    version, holds the screen's Show commands switch, shows where the
+    activity log is with Copy, and leads to Remove RadialRig. The old
+    listing's framed removal, with its count of projects, is gone with
+    the redesign."""
     registered(capsys, _make_project(tmp_path / "one"))
-    one = manage_web.REMOVAL_WHAT.format(scope=manage_web.REMOVAL_ONE)
-    assert frame_sentence() == one
-    assert "1 project" in one and "projects" not in one
-    registered(capsys, _make_project(tmp_path / "two"))
-    registered(capsys, _make_project(tmp_path / "three"))
-    assert len(ro.listing()) == 3
-    many = manage_web.REMOVAL_WHAT.format(
-        scope=manage_web.REMOVAL_MANY.format(count=3))
-    assert frame_sentence() == many
-    assert "3 projects" in many
-    assert "{" not in none + one + many
+    run_ = manage()
+    page = run_.page()
+    foot = main_of(page).split('<footer class="foot">', 1)[1].split("</footer>", 1)[0]
+    assert (f'<span class="build">'
+            f"{manage_web.FOOT_VERSION.format(version=mnt.installed_version())}</span>") in foot
+    assert SHOW_COMMANDS_BOX in foot
+    log = str(al.log_path())
+    assert f"<summary>{manage_web.LOG_LABEL}</summary>" in foot
+    assert [html.unescape(copy) for _, copy, _ in COPY_LINE.findall(foot)] == [log]
+    (target,) = [t for t in navigations(foot, run_.session.token)]
+    assert f"view={manage_web.REMOVAL}" in target
+    status, removal, _ = run_.get(target)
+    assert status == 200
+    assert manage_web.REMOVAL_HEAD in text_of(removal)
+    for gone in ("REMOVAL_LABEL", "REMOVAL_WHAT", "REMOVAL_ONE", "REMOVAL_MANY"):
+        assert not hasattr(manage_web, gone), gone
     assert run_.running
 
 
@@ -1769,15 +1846,20 @@ def test_the_listing_frame_counts_the_projects_it_would_reverse(
 # an unmounted project offers the mount. The done-condition's pins, on the
 # same three-project roster, one test per pin.
 
-def status_of(page: str) -> str:
-    """The Status section's markup, heading excluded."""
-    return main_of(page).split(f"<h2>{manage_web.STATUS_HEAD}</h2>", 1)[1] \
-        .split("</section>", 1)[0]
+def repair_commands_in(page: str) -> list[str]:
+    """The commands under the status band, in order."""
+    band = main_of(page).split('<div class="status-band">', 1)[1].split(
+        '<table class="skill-grid">', 1)[0]
+    return [html.unescape(copy) for _, copy, _ in COPY_LINE.findall(band)]
 
 
-def section_of(page: str, head: str) -> str:
-    """One section's markup, heading excluded."""
-    return main_of(page).split(f"<h2>{head}</h2>", 1)[1].split("</section>", 1)[0]
+def withheld(page: str) -> list[str]:
+    """What Details lists in a repair's way, where Repair is withheld."""
+    details = main_of(page).split('<details class="settings">', 1)[1].split("</details>", 1)[0]
+    if manage_web.REPAIR_BLOCKERS_HEAD not in details:
+        return []
+    part = details.split(f"<h3>{manage_web.REPAIR_BLOCKERS_HEAD}</h3>", 1)[1].split("</ul>", 1)[0]
+    return [html.unescape(item) for item in re.findall(r"<li>([^<]*)</li>", part)]
 
 
 def repair_commands(root: Path) -> list[str]:
@@ -1788,64 +1870,56 @@ def repair_commands(root: Path) -> list[str]:
     ]
 
 
-def test_a_mismatch_names_its_client_on_every_surface_and_fills_the_commands(
+def test_a_lost_link_names_its_client_on_every_surface_and_fills_the_commands(
     tmp_path, env, client_here, command, capsys, manage,
 ):
-    """Prescriptions 1 and 2: one sentence, three surfaces, filled in.
-
-    The listing row, the project page and the removal page say the same
-    sentence about the mismatched record, naming the client the record
-    claims by its label from the table; the command line's row says it
-    too. The project page writes the two-verb remedy out under the
-    Status facts with the client and the path filled, behind the phase 2
-    disclosure; the listing drops the tail with the placeholders and the
-    command line keeps it.
-    """
+    """A lost link is said in `wording.md`'s words on the two redesigned
+    screens, naming the client the record claims by its label from the
+    table: "link lost" on its row and "lost its link to this project" as
+    its status. Repair's two commands stand under the status, filled in,
+    in the order the press runs them. Removing it says, on Confirm a big
+    change, that the removal leaves the client's settings and the
+    project's record, and how to clear it, with no disconnect among its
+    commands (PLAN-0027 phase 3). The command line keeps the engine's own
+    sentence and its remedy tail with the placeholders."""
     alpha, beta, gamma = three_projects(tmp_path, capsys, client_here)
     root = beta.resolve()
     facts = ro.verify(root)
     assert facts.claimed == CLIENT
     label = cn.CLIENTS[CLIENT].label
-    sentence = f"{label}'s settings no longer carry the entry this project's record claims"
-    assert ro.mismatch_clause(facts) == sentence
-    assert ro.MISMATCH_CLAUSE == \
-        "{label}'s settings no longer carry the entry this project's record claims"
+    sentence = ro.mismatch_clause(facts)
+    assert sentence == f"{label}'s settings no longer carry the entry this project's record claims"
     run_ = manage()
 
     listing = run_.page()
-    by_name = {name: facts_ for name, _, _, facts_ in listing_rows(listing)}
-    assert ("connection", sentence) in by_name["beta"]
-    assert sentence in text_of(listing)
-    assert report.PROJECTS_MISMATCH_TAIL not in text_of(listing)
+    by_name = {name: facts_ for name, _, _, facts_, _ in roster_rows(listing)}
+    assert by_name["beta"] == f"{label} link lost, no skills"
+    assert sentence not in text_of(listing)
 
     page = project_page(run_, beta)
-    status = status_of(page)
-    assert f'<p class="fact connection">{html.escape(sentence, quote=False)}</p>' in status
-    assert manage_web.REPAIR_NOTE in html.unescape(status)
-    # The remedy: both commands, in the order they run, behind one
-    # disclosure, each with its Copy button named for it.
-    assert status.count('<details class="command">') == 1
-    disclosed = status.split('<details class="command">', 1)[1].split("</details>", 1)[0]
-    assert disclosed.startswith(f"<summary>{manage_web.SHOW_COMMAND}</summary>")
-    copied = [html.unescape(c) for c in re.findall(r'data-copy="([^"]*)"', disclosed)]
-    assert copied == repair_commands(root)
-    assert copied == [f"radialrig unconnect {CLIENT} {root}",
-                      f"radialrig connect {CLIENT} {root}"]
-    for line in copied:
-        assert f'aria-label="{html.escape(manage_web.COPY_NAME.format(command=line), quote=True)}"' in disclosed
+    assert status_band(page) == [("repair", f"{label} lost its link to this project.", "Repair")]
+    assert repair_commands_in(page) == repair_commands(root)
+    assert repair_commands(root) == [f"radialrig unconnect {CLIENT} {root}",
+                                     f"radialrig connect {CLIENT} {root}"]
+    assert ('<div class="connection"><strong>' + label + "</strong>"
+            + '<span class="state"><span class="symbol repair" aria-hidden="true">!</span>'
+            f"<span>{manage_web.LINK_LOST_STATE}</span></span></div>") in connections_of(page)
     said = text_of(page)
+    assert sentence not in said
     assert "<client>" not in said and "<PATH>" not in said
     assert report.PROJECTS_MISMATCH_TAIL not in said
     assert "{label}" not in said and "{file}" not in said
 
-    removal = view(run_, manage_web.REMOVAL)
-    assert sentence in text_of(removal)
-    assert report.PROJECTS_MISMATCH_TAIL not in text_of(removal)
-    block = next(part for part in main_of(removal).split("<fieldset")
-                 if f"<legend>{html.escape(str(root), quote=False)}</legend>" in part)
-    copied = [html.unescape(c) for c in re.findall(r'data-copy="([^"]*)"', block)]
-    assert copied[:2] == repair_commands(root)
-    assert "<details" not in block
+    card = pressed(run_, {"action": manage_web.REVERSAL, "root": str(root),
+                          "from": manage_web.PROJECT})
+    said = text_of(card)
+    assert (f"{label} already lost its link to this project, so this leaves its "
+            "settings alone and keeps this project's connection record. To take the "
+            "record out too, repair the link first, then remove.") in said
+    assert report.PROJECTS_MISMATCH_TAIL not in said
+    copied = [html.unescape(c) for c in re.findall(r'data-copy="([^"]*)"', main_of(card))]
+    assert copied == [act.command for act in manage_web.reversal_steps(facts)]
+    assert not any(line.startswith("radialrig unconnect") for line in copied)
 
     code, out, _ = run(capsys, "projects")
     assert code == 0
@@ -1853,69 +1927,52 @@ def test_a_mismatch_names_its_client_on_every_surface_and_fills_the_commands(
     assert report.PROJECTS_MISMATCH_TAIL in out
     # The healthy and the unmounted project say nothing of the kind.
     for project in (alpha, gamma):
-        assert sentence not in text_of(project_page(run_, project))
-        assert manage_web.REPAIR_NOTE not in text_of(project_page(run_, project))
+        assert "lost its link" not in text_of(project_page(run_, project))
     assert run_.running
 
 
-def test_the_repair_row_stands_only_where_the_client_is_detected(
+def test_repair_stands_only_where_its_guard_offers_it(
     tmp_path, monkeypatch, env, client_here, command, capsys, manage,
 ):
-    """Prescription 3's gate, and constraint 7 narrowed.
+    """Prescription 7: Repair's button shows only where today's repair
+    plan would offer one, and where it doesn't the status says why.
 
-    With the client detected here, the Connections section is one row:
-    the client's label, the repair sentence, the one press, and no
-    connect or disconnect press. With `APPDATA` narrowed to a profile
-    holding no client — the way the no-client test narrows it — the
-    label still stands in the sentence about the record, and no press
-    for that client stands anywhere on the page. With the read server's
-    command unlocatable, the same.
+    With the client detected, the status band carries Repair, the screen's
+    one amber, and the Connections row reads Link lost with no press. With
+    `APPDATA` narrowed to a profile holding no client, the status says the
+    client isn't on this computer; with the read server's command not
+    locatable, it says RadialRig can't find its own rule lookup program.
+    Neither offers any press that writes to the client.
     """
     alpha, beta, gamma = three_projects(tmp_path, capsys, client_here)
     root = beta.resolve()
     label = cn.CLIENTS[CLIENT].label
-    sentence = ro.mismatch_clause(ro.verify(root))
-    assert manage_web.REPAIR_LABEL == "Repair the {label} connection"
 
     run_ = manage()
     page = project_page(run_, beta)
-    connections = section_of(page, manage_web.CONNECTIONS_HEAD)
-    assert connections.count("<h3") == 1
-    assert (f'<h3 class="label">{label}</h3>'
-            f'<p class="state">{html.escape(sentence, quote=False)}</p>') in connections
-    presses = POST_PRESS.findall(connections)
-    assert len(presses) == 1
-    fields = dict(HIDDEN.findall(presses[0]))
-    assert fields == {"token": run_.session.token, "action": manage_web.REPAIR,
-                      "root": str(root)}
-    assert GHOST.search(presses[0]).group(1) == f"Repair the {label} connection"
-    assert "<details" not in connections
+    assert status_band(page) == [("repair", f"{label} lost its link to this project.", "Repair")]
+    presses = [dict(HIDDEN.findall(inner)) for inner in POST_PRESS.findall(main_of(page))]
+    assert {"token": run_.session.token, "action": manage_web.REPAIR, "root": str(root),
+            "confirm": "yes", "from": manage_web.PROJECT} in presses
+    assert POST_PRESS.search(connections_of(page)) is None
     body = main_of(page)
     assert f'value="{manage_web.CONNECT}"' not in body
     assert f'value="{manage_web.UNCONNECT}"' not in body
     assert body.count(f'value="{manage_web.REPAIR}"') == 1
-    assert main_of(page).count(PRIMARY) == 0
+    assert body.count(PRIMARY) == 1
 
-    # The client not detected: the sentence still names it; no press.
+    # The client not detected: the status says so, and nothing is offered.
     monkeypatch.setenv("APPDATA", str(tmp_path / "no-client"))
     assert cn.detect(cn.CLIENTS[CLIENT]) == ()
     assert ro.verify(root).connected == ro.CONNECTED_MISMATCH
     page = project_page(run_, beta)
-    body = main_of(page)
-    assert sentence in text_of(page)
-    assert label in text_of(page)
-    assert f'<p class="hint">{manage_web.CONNECTIONS_NONE}</p>' in \
-        section_of(page, manage_web.CONNECTIONS_HEAD)
+    assert status_band(page) == [("repair", manage_web.REPAIR_NO_CLIENT.format(label=label), "")]
+    assert manage_web.REPAIR_NO_CLIENT.format(label=label) == (
+        f"This project is connected to {label}, but {label} isn't on this computer.")
     for value in (manage_web.REPAIR, manage_web.CONNECT, manage_web.UNCONNECT):
-        assert f'value="{value}"' not in body, value
-    assert manage_web.REPAIR_LABEL.format(label=label) not in body
-    # The Status section still carries the sentence and the filled remedy.
-    status = status_of(page)
-    assert html.escape(sentence, quote=False) in status
-    assert [html.unescape(c) for c in re.findall(r'data-copy="([^"]*)"', status)] \
-        == repair_commands(root)
+        assert f'value="{value}"' not in main_of(page), value
 
-    # The read server's command not locatable: the same.
+    # The read server's command not locatable: the same, said its own way.
     monkeypatch.setenv("APPDATA", env["APPDATA"])
     assert cn.detect(cn.CLIENTS[CLIENT])
     monkeypatch.setattr(cn, "_which", lambda name: None)
@@ -1924,9 +1981,8 @@ def test_the_repair_row_stands_only_where_the_client_is_detected(
     with pytest.raises(cn.ConnectError):
         cn.read_command()
     page = project_page(run_, beta)
-    assert sentence in text_of(page)
+    assert status_band(page) == [("repair", manage_web.REPAIR_NO_PROGRAM.format(label=label), "")]
     assert f'value="{manage_web.REPAIR}"' not in main_of(page)
-    assert manage_web.CONNECTIONS_NONE in section_of(page, manage_web.CONNECTIONS_HEAD)
     assert run_.running
 
 
@@ -1985,7 +2041,6 @@ def test_the_repair_plan_carries_both_commands_and_one_primary(
         urllib.parse.urlencode([("s", run_.session.token), ("view", manage_web.ROSTER)]),
     ]
     assert manage_web.PROJECT_BACK_LABEL in text_of(plan)
-    assert manage_web.REMOVAL_BACK_LABEL not in text_of(plan)
 
     # Both entries gone from the file: both steps rehearse clean.
     settings = json.loads(client_here.read_text(encoding="utf-8"))
@@ -2008,9 +2063,10 @@ def test_the_repair_plan_carries_both_commands_and_one_primary(
 def test_the_repair_leaves_the_client_carrying_the_records_entries(
     tmp_path, env, client_here, command, capsys, manage,
 ):
-    """Prescription 3's confirm: the two verbs run in order; the client's
-    settings carry the record's entries again, the state reads the
-    client's name, and the report is the two reports."""
+    """Today's two-step repair's confirm, which the redesigned screens no
+    longer post but the plan page still does: the two verbs run in order;
+    the client's settings carry the record's entries again, the state
+    reads the client's name, and the report is the two reports."""
     alpha, beta, gamma = three_projects(tmp_path, capsys, client_here)
     root = beta.resolve()
     run_ = manage()
@@ -2040,14 +2096,15 @@ def test_the_repair_leaves_the_client_carrying_the_records_entries(
     entries = cn._recorded_entries(record)
     assert entries
     assert all(servers[key] == entry for key, entry in entries.items())
-    # The listing no longer carries the chip, and the command line agrees.
+    # Projects no longer reads it as needing repair, and the command line
+    # agrees.
     listing = run_.page()
-    assert REPAIR not in text_of(listing)
-    assert [chip for _, _, chip, _ in listing_rows(listing)] == ["", "", ""]
+    assert [status for _, _, status, _, _ in roster_rows(listing)] == [
+        "Not set up", "Working", "Working"]
     code, porcelain, _ = run(capsys, "projects", "--porcelain")
     assert code == 0
     assert f"root={root}\tmounted=yes\tconnected={CLIENT}\t" in porcelain
-    # The project page now offers the disconnect, no repair.
+    # The project's screen now offers Disconnect, and no Repair.
     page = main_of(project_page(run_, beta))
     assert f'value="{manage_web.REPAIR}"' not in page
     assert f'value="{manage_web.UNCONNECT}"' in page
@@ -2146,10 +2203,12 @@ def test_a_partial_first_answer_is_the_engines_partial(
 def test_a_record_naming_no_known_client_shows_the_file_and_no_press(
     tmp_path, env, client_here, command, capsys, manage,
 ):
-    """Prescription 1's other sentence: a record this build cannot read a
-    client off names the record file, on every surface, and the page
-    offers no press for a client it cannot name — no remedy, no repair,
-    no connect."""
+    """A record this build cannot read a client off: the row still reads
+    Needs repair, and the project's status says RadialRig can't read the
+    record, with the record's path in Details and no press — no repair, no
+    connect. Its removal takes out the files alone and says the record
+    stays (PLAN-0027 phase 3). The command line names the record file in
+    the engine's own sentence."""
     alpha, beta, gamma = three_projects(tmp_path, capsys, client_here)
     root = beta.resolve()
     record = cn.record_path(root)
@@ -2160,35 +2219,29 @@ def test_a_record_naming_no_known_client_shows_the_file_and_no_press(
     assert (facts.connected, facts.claimed) == (ro.CONNECTED_MISMATCH, "")
     sentence = f"This project's record names no client this build knows: see {record}"
     assert ro.mismatch_clause(facts) == sentence
-    assert ro.UNKNOWN_CLIENT_CLAUSE == \
-        "This project's record names no client this build knows: see {file}"
-    label = cn.CLIENTS[CLIENT].label
     run_ = manage()
 
     listing = run_.page()
-    by_name = {name: facts_ for name, _, _, facts_ in listing_rows(listing)}
-    assert ("connection", sentence) in by_name["beta"]
-    assert [chip for name, _, chip, _ in listing_rows(listing) if name == "beta"] == [REPAIR]
+    assert [(status, fix) for name, _, status, _, fix in roster_rows(listing)
+            if name == "beta"] == [("Needs repair", "")]
 
     page = project_page(run_, beta)
-    status = status_of(page)
-    assert f'<p class="fact connection">{html.escape(sentence, quote=False)}</p>' in status
-    assert "<details" not in status
-    assert manage_web.REPAIR_NOTE not in text_of(page)
-    assert "data-copy" not in status
-    connections = section_of(page, manage_web.CONNECTIONS_HEAD)
-    assert connections == f'<p class="hint">{manage_web.CONNECTIONS_NONE}</p>'
+    assert status_band(page) == [("repair", manage_web.REPAIR_NO_RECORD, "")]
+    assert manage_web.REPAIR_NO_RECORD == (
+        "RadialRig can't read this project's connection record, so it can't "
+        "repair the link from here.")
+    assert withheld(page) == [manage_web.RECORD_AT.format(path=record)]
+    assert repair_commands_in(page) == []
     body = main_of(page)
     for value in (manage_web.REPAIR, manage_web.CONNECT, manage_web.UNCONNECT):
         assert f'value="{value}"' not in body, value
-    assert label not in text_of(page)
     assert body.count(PRIMARY) == 0
 
-    removal = view(run_, manage_web.REMOVAL)
-    assert sentence in text_of(removal)
-    block = next(part for part in main_of(removal).split("<fieldset")
-                 if f"<legend>{html.escape(str(root), quote=False)}</legend>" in part)
-    assert re.findall(r'data-copy="([^"]*)"', block) == [f"radialrig unmount {root}"]
+    card = pressed(run_, {"action": manage_web.REVERSAL, "root": str(root),
+                          "from": manage_web.PROJECT})
+    assert "keeps this project's connection record" in text_of(card)
+    assert [html.unescape(c) for c in re.findall(r'data-copy="([^"]*)"', main_of(card))] \
+        == [f"radialrig unmount {root}"]
 
     code, out, _ = run(capsys, "projects")
     assert code == 0
@@ -2200,98 +2253,76 @@ def test_a_record_naming_no_known_client_shows_the_file_and_no_press(
     record.write_bytes(b"{ not json\n")
     facts = ro.verify(root)
     assert (facts.connected, facts.claimed) == (ro.CONNECTED_MISMATCH, "")
-    assert sentence in text_of(project_page(run_, beta))
+    assert status_band(project_page(run_, beta)) == [
+        ("repair", manage_web.REPAIR_NO_RECORD, "")]
     assert run_.running
 
 
-def test_an_unmounted_project_offers_the_mount_press(
+def test_a_project_not_set_up_offers_set_up(
     tmp_path, env, client_here, command, capsys, manage,
 ):
-    """Prescription 4: "Not mounted" opens the Status section and one
-    press under it, the page's one amber, a form to the walkthrough on
-    this folder; the Skills and Connections sections say once that their
-    presses stand without the mount; a mounted project has none of it."""
+    """actions.md row 11: "Not set up" is the status, and Set up beside
+    it, the screen's one amber, is a form to the walkthrough on this
+    folder, which writes nothing until its own press. A project that is
+    set up has none of it."""
     alpha, beta, gamma = three_projects(tmp_path, capsys, client_here)
     root = gamma.resolve()
-    assert manage_web.MOUNT_LABEL == "Mount this project"
-    assert manage_web.NO_MOUNT_NEEDED == \
-        "Each of these stands on its own and does not need the mount."
     run_ = manage()
 
     page = project_page(run_, gamma)
+    assert status_band(page) == [("new", "RadialRig is not set up in this project.", "Set up")]
     body = main_of(page)
-    status = status_of(page)
-    assert status.startswith('<div class="facts"><p class="fact mounted">Not mounted</p>')
     assert body.count(PRIMARY) == 1
-    assert PRIMARY in status
-    press = next(
-        (action, inner) for action, inner in GET_FORM.findall(status)
-        if PRIMARY in inner)
-    action, inner = press
+    band = body.split('<div class="status-band">', 1)[1].split('<table class="skill-grid">', 1)[0]
+    action, inner = GET_FORM.search(band).groups()
     assert action == PATH
     assert dict(HIDDEN.findall(inner)) == {
         "s": run_.session.token, "view": manage_web.SETUP, "root": str(root)}
-    assert (f'<div class="actions"><button class="primary" type="submit">'
-            f"{manage_web.MOUNT_LABEL}</button></div>") in inner
-    assert status.index('<div class="facts">') < status.index(PRIMARY)
-    # Once above the rows of each of the two sections, and nowhere else:
-    # above the agents' lists in Skills, above the rows in Connections.
-    assert section_of(page, manage_web.SKILLS_HEAD).startswith(
-        f'<p class="hint">{manage_web.NO_MOUNT_NEEDED}</p>'
-        '<fieldset class="skills agent"><legend>')
-    assert section_of(page, manage_web.CONNECTIONS_HEAD).startswith(
-        f'<p class="hint">{manage_web.NO_MOUNT_NEEDED}</p><ul class="rows">')
-    assert body.count(manage_web.NO_MOUNT_NEEDED) == 2
-    assert manage_web.NO_MOUNT_NEEDED not in status
-    # The press leads to the walkthrough on this folder: the mount plan.
+    assert f'<button class="primary" type="submit">{manage_web.SETUP_BUTTON}</button>' in inner
     target = next(t for t in navigations(page, run_.session.token)
                   if f"view={manage_web.SETUP}" in t)
     status_code, walkthrough, _ = run_.get(target)
     assert status_code == 200
-    assert setup_web.MOUNT_LABEL in walkthrough
-    assert f"radialrig mount {root}" in text_of(walkthrough)
+    assert f"<h1>Set up RadialRig in {gamma.name}</h1>" in walkthrough
+    assert f'value="mount">{setup_web.SETUP_LABEL}</button>' in walkthrough
+    assert f'data-copy="radialrig mount {root}"' in walkthrough
     assert not mnt.is_mounted(root), "the press wrote something"
-    # A mounted project's page has none of this.
+    for gone in ("MOUNT_LABEL", "NO_MOUNT_NEEDED"):
+        assert not hasattr(manage_web, gone), gone
+    # A project that is set up has none of this.
     for project in (alpha, beta):
         mounted = project_page(run_, project)
-        assert main_of(mounted).count(PRIMARY) == 0, project.name
-        assert manage_web.MOUNT_LABEL not in main_of(mounted)
-        assert manage_web.NO_MOUNT_NEEDED not in main_of(mounted)
+        assert manage_web.SETUP_BUTTON not in [fix for _, _, fix in status_band(mounted)]
         assert f"view={manage_web.SETUP}" not in "".join(
             navigations(mounted, run_.session.token))
-    css = (packaged_web() / "page.css").read_text(
-        encoding="utf-8").replace("\r\n", "\n")
-    assert ".facts + form.nav .actions {" in css
     assert run_.running
 
 
-def test_no_offered_press_is_refused_on_an_unmounted_project(
+def test_no_offered_press_is_refused_on_a_project_not_set_up(
     tmp_path, env, client_here, command, capsys, manage,
 ):
-    """Prescription 4's other half: every press the unmounted page
-    offers stands without the mount. Each confirm is posted as the page
-    drew it, and the engine answers with a report, never a refusal."""
+    """Every one-press change a screen not set up offers stands without
+    the mount. Each is posted as the screen drew it, and each answers with
+    a result line that isn't a failure."""
     alpha, beta, gamma = three_projects(tmp_path, capsys, client_here)
     root = gamma.resolve()
     run_ = manage()
     page = project_page(run_, gamma)
-    body = main_of(page)
-    presses = [dict(HIDDEN.findall(inner)) for inner in POST_PRESS.findall(body)]
-    # Per agent, the whole-catalog press and one add per skill; then the
-    # registration's removal.
-    assert len(presses) == (len(sk.catalog_names()) + 1) * len(sk.HARNESSES) + 1
-    assert {press["action"] for press in presses} == {
+    presses = [dict(HIDDEN.findall(inner)) for inner in POST_PRESS.findall(main_of(page))]
+    # The one-press changes carry `confirm`; the removal's first press
+    # opens Confirm a big change and carries none (PLAN-0027 phase 3).
+    now = [fields for fields in presses if fields.get("confirm")]
+    # Per agent, Add all and one cell per skill; then Disconnect.
+    assert len(now) == (len(sk.catalog_names()) + 1) * len(sk.HARNESSES) + 1
+    assert {fields["action"] for fields in now} == {
         manage_web.SKILL_ADD, manage_web.SKILL_ADD_ALL, manage_web.UNCONNECT}
-    assert {press.get("harness") for press in presses[:-1]} == set(sk.HARNESSES)
-    for fields in presses:
+    for fields in now:
         fields.pop("token")
-        done = pressed(run_, fields, confirm=True)
-        said = text_of(done)
-        assert manage_web.DONE_CAPTION in said, fields
-        assert '<div class="refusal"' not in done, fields
-        assert manage_web.REFUSED_CAPTION not in said, fields
-        assert manage_web.ACTION_FAILED_HEAD not in said, fields
-        assert manage_web.ROSTER_HEAD not in said, fields
+        done = pressed(run_, fields)
+        tone, sentence, _, _ = result_of(done)
+        assert tone == manage_web.RESULT_DONE, (fields, sentence)
+        assert "Couldn't" not in sentence, fields
+        assert f"<h1>{root.name}</h1>" in main_of(done)
     facts = ro.verify(root)
     assert not facts.mounted
     assert facts.skills == tuple(sorted(sk.catalog_names()))
@@ -2325,7 +2356,7 @@ def test_an_unreadable_roster_is_named_on_the_page_and_not_by_the_cli(
     said = text_of(page)
     assert manage_web.UNREADABLE_NOTICE.format(path=path) in said
     assert str(path) in said
-    assert listing_rows(page) == []
+    assert roster_rows(page) == []
     assert path.read_bytes() == body, "the page wrote the roster file"
 
     code, out, err = run(capsys, "projects")
@@ -2793,69 +2824,68 @@ def test_the_add_project_field_keeps_the_id_the_picker_writes_into(manage):
     assert 'getElementById("browse")' in script
 
 
-def test_the_listing_reads_the_way_the_accepted_wireframe_writes_it(
+def test_projects_reads_the_way_the_design_writes_it(
     tmp_path, env, capsys, manage,
 ):
-    """The manage surface's own shape, word for word.
-
-    PLAN-0014 phase 1's listing, which replaces the wireframe of
-    2026-08-21: one table carrying the project, its three facts and the
-    control that opens it, under a heading with the add control beside
-    it; the buttons named the way the plan names them; no count in the
-    heading and no command frame anywhere; and the one destructive press
-    framed alone at the page end.
-    """
+    """The redesigned Projects, word for word (`wording.md`): the masthead,
+    the heading with Add a project at its end, one row per project, and
+    the foot. No count in the heading, no command shown until Show
+    commands is ticked, and no plan table."""
     assert run(capsys, "mount", str(_make_project(tmp_path / "alpha")))[0] == 0
 
     page = manage().page()
     body = main_of(page)
     said = text_of(page)
 
-    # The masthead, the heading row, and the columns.
     assert f'<span class="name">{manage_web.TITLE}</span>' in page
-    assert (f'<div class="head-row"><h1>{manage_web.ROSTER_HEAD}</h1>'
-            f'<a class="ghost" href="#{manage_web.ADD_ID}">'
-            f"{manage_web.ADD_HEAD}</a></div>") in body
-    assert manage_web.ROSTER_COLUMNS == ("Project", "Status")
-    for head in manage_web.ROSTER_COLUMNS:
-        assert f'<th scope="col">{head}</th>' in body
-    assert ('<th scope="col"><span class="sr">'
-            f"{manage_web.OPEN_LABEL}</span></th>") in body
-
-    # One table, and the control is a cell on the row rather than a
-    # second copy of the listing beneath it.
-    assert body.count("<table") == 1
-    assert ('<button class="ghost row-open" type="submit">'
-            f"{manage_web.OPEN_LABEL}</button>") in body
-    assert body.count(manage_web.OPEN_LABEL) == 2   # the row, and the head
-
-    # No command frame on this surface, and no count in the heading.
+    assert manage_web.TITLE == "RadialRig"
+    assert body.startswith('<div class="screen projects"><header class="page-head">'
+                           f"<h1>{manage_web.ROSTER_HEAD}</h1>")
+    assert roster_rows(page) == [("alpha", str(tmp_path.resolve()), "Working",
+                                  "No skills" if not cn.installed() else
+                                  "No connections or skills", "")]
+    assert "<table" not in body
     assert '<div class="cmd">' not in body
     assert "radialrig projects" not in said
     assert report.PROJECTS_HEAD not in said
+    # The folder field behind Add a project: its label for a reader by
+    # ear, the picker's button beside it, hidden until the app shows it,
+    # and Continue, rendered enabled for the script to hold.
+    assert (f'<label class="sr" for="root">{manage_web.ADD_FIELD_LABEL}</label>') in body
+    assert (f'<button type="button" id="browse" hidden>{manage_web.BROWSE_LABEL}'
+            "</button>") in body
+    assert manage_web.ADD_LABEL == "Continue"
+    assert not re.search(r"<[^>]*\sdisabled\b[^>]*>", body)
+    for gone in ("ADD_LEDE", "ADD_PICKER_NOTE", "ROSTER_COLUMNS", "OPEN_LABEL"):
+        assert not hasattr(manage_web, gone), gone
+    # And the foot, last.
+    assert body.endswith("</footer></div>")
+    assert manage_web.REMOVE_ALL_LABEL in body.split('<footer class="foot">', 1)[1]
 
-    # The folder row, with the picker's button beside the field, the line
-    # saying the picker fills it, and the one amber press under it, which
-    # opens the mount plan and is rendered enabled for the script to hold.
-    assert f'<fieldset class="skills" id="{manage_web.ADD_ID}">' in body
-    assert '<div class="picker">' in body
-    assert (f'<button class="ghost" type="button" id="browse" hidden>'
-            f"{manage_web.BROWSE_LABEL}") in body
-    assert ('<div class="actions"><button class="primary" type="submit">'
-            f"{manage_web.ADD_LABEL}</button></div>") in body
-    assert manage_web.ADD_LABEL == "Review the mount plan"
-    assert "disabled" not in body
-    assert manage_web.ADD_LEDE in said
-    assert setup_web.MOUNT_LABEL in manage_web.ADD_LEDE
-    assert manage_web.ADD_PICKER_NOTE in said
 
-    # And the reversal, framed and last.
-    assert body.rstrip().endswith("</section>")
-    frame = body.split('<section class="reversal">', 1)[1]
-    assert f"<h2>{manage_web.REMOVAL_LABEL}</h2>" in frame
-    assert manage_web.REMOVAL_WHAT.format(scope=manage_web.REMOVAL_ONE) in said
-    assert ('<div class="actions"><button class="ghost" type="submit">'
-            f"{manage_web.REMOVAL_LABEL}</button></div>") in frame
+def test_the_first_set_up_takes_the_amber_when_nothing_else_needs_it(
+    tmp_path, env, capsys, manage,
+):
+    """Projects' one amber, with no row to repair or clean up and nothing
+    behind, is the first row's Set up, as mockups 02-updates-done and
+    02-projects-repaired draw it (PLAN-0027 phase 5). A row that needs
+    repair or an update line keeps it, as before."""
+    alpha, beta, gamma = (_make_project(tmp_path / name)
+                          for name in ("alpha", "beta", "gamma"))
+    for root in (alpha, beta, gamma):
+        assert run(capsys, "mount", str(root))[0] == 0
+    for root in (beta, gamma):
+        assert run(capsys, "unmount", str(root))[0] == 0
+
+    page = manage().page()
+    body = main_of(page).replace(
+        f'<button class="primary" type="submit">{manage_web.ADD_LABEL}</button>', "")
+    assert [(name, status, fix) for name, _, status, _, fix in roster_rows(page)] == [
+        ("beta", "Not set up", "Set up"), ("gamma", "Not set up", "Set up"),
+        ("alpha", "Working", "")]
+    assert body.count(PRIMARY) == 1
+    assert f'{PRIMARY} aria-label="Set up beta" type="submit">' in body
+    assert '<button aria-label="Set up gamma" type="submit">' in body
 
 
 def test_the_server_survives_navigation_and_outcomes_never_leak(
@@ -2929,11 +2959,17 @@ def test_a_navigation_to_a_folder_that_is_gone_reads_as_a_navigation(
     quoted = urllib.parse.quote(str(missing))
     run_ = manage()
 
-    for name in (manage_web.PROJECT, manage_web.SETUP):
-        said = text_of(run_.page(f"&view={name}&root={quoted}"))
-        assert manage_web.MISSING_HEAD in said, name
-        assert manage_web.NO_DIRECTORY.format(path=missing) in said, name
-        assert manage_web.ACTION_FAILED_HEAD not in said, name
+    said = text_of(run_.page(f"&view={manage_web.PROJECT}&root={quoted}"))
+    assert manage_web.MISSING_HEAD in said
+    assert manage_web.NO_DIRECTORY.format(path=missing) in said
+    assert manage_web.ACTION_FAILED_HEAD not in said
+    # Add a project says it on its own card, Folder not found, with the
+    # folder field to mend the path in (PLAN-0027 phase 2).
+    said = text_of(run_.page(f"&view={manage_web.SETUP}&root={quoted}"))
+    assert manage_web.NOT_FOUND_HEAD in said
+    assert manage_web.NOT_FOUND_SAID in said
+    assert str(missing) in said
+    assert manage_web.ACTION_FAILED_HEAD not in said
 
     # A press that really did fail still carries the press's own head.
     assert run(capsys, "mount", str(_make_project(tmp_path / "host")))[0] == 0
@@ -2982,11 +3018,11 @@ def test_a_navigation_naming_a_relative_folder_opens_no_view_on_it(
             said = text_of(page)
             # The listing's own heading, and neither of the two views that
             # stand on one project: the walkthrough carries the way back
-            # to the listing, and the project page carries its Status
-            # section (PLAN-0014 phase 2); the listing carries neither.
+            # to the listing, and the project page carries its status
+            # band (PLAN-0027 phase 1); the listing carries neither.
             assert f"<h1>{manage_web.ROSTER_HEAD}</h1>" in main_of(page), (name, field)
             assert manage_web.ROSTER_BACK_LABEL not in said, (name, field)
-            assert f"<h2>{manage_web.STATUS_HEAD}</h2>" not in page, (name, field)
+            assert '<div class="status-band">' not in page, (name, field)
             assert "no such directory" not in said, (name, field)
     assert run_.running
 
@@ -3043,7 +3079,7 @@ def main_of(page: str) -> str:
 
 def reads_as(page: str) -> str:
     """Everything on the page a reader sees, masthead included."""
-    return " ".join(html.unescape(TAGS.sub(" ", STYLED.sub(" ", page))).split())
+    return " ".join(html.unescape(TAGS.sub(" ", PIECES.sub(r"\1", STYLED.sub(" ", page)))).split())
 
 
 def strings_in(value) -> list[str]:
@@ -3091,9 +3127,10 @@ def every_state(run_, tmp_path, env, capsys, client_here) -> dict[str, str]:
     """One page per state this build renders, on one machine.
 
     Collected in the order a reader reaches them: the views first, then
-    the walkthrough that adds a project, then every press twice — the
-    rehearsal and the run — then the two ways a press stops, then a whole
-    reversal, and last the two rosters a reader can be left holding.
+    the walkthrough that adds a project, then every two-step press twice
+    — the rehearsal and the run — then each one-press change and its
+    result line, then the two ways a press stops, then a whole reversal,
+    and last the two rosters a reader can be left holding.
 
     Each press undoes the one before it, so the machine under them stands
     still and every state is reached on the same fixture.
@@ -3106,12 +3143,17 @@ def every_state(run_, tmp_path, env, capsys, client_here) -> dict[str, str]:
     (foreign / SKILL_DIR).mkdir(parents=True)
     (foreign / SKILL_DIR / "ours.md").write_bytes(b"our own skill\n")
 
-    # One entry whose project is gone, so the orphan block renders too.
+    # Two entries whose project is gone, so two leftover rows render too:
+    # one for today's two presses, one for Clean up's one press.
     key = f"{PREFIX}old"
     body = json.loads(client_here.read_text(encoding="utf-8"))
     body["mcpServers"][key] = {
         "command": "x", "args": [],
         "env": {ROOT_ENV: str(tmp_path / "vanished")},
+    }
+    body["mcpServers"][f"{PREFIX}older"] = {
+        "command": "x", "args": [],
+        "env": {ROOT_ENV: str(tmp_path / "gone-too")},
     }
     client_here.write_text(json.dumps(body, indent=2), encoding="utf-8")
 
@@ -3125,9 +3167,9 @@ def every_state(run_, tmp_path, env, capsys, client_here) -> dict[str, str]:
         "gone": view(run_, manage_web.PROJECT, root=tmp_path / "never-was"),
     }
 
-    # The repair (PLAN-0014 phase 3), in its two presses on the
+    # The repair (PLAN-0014 phase 3), in today's two presses on the
     # mismatched project: the rehearsal and the run. It leaves beta
-    # registered again, which nothing below reads.
+    # registered again.
     repair = {"action": manage_web.REPAIR, "root": str(beta)}
     pages["repair plan"] = pressed(run_, repair)
     pages["repaired"] = pressed(run_, repair, confirm=True)
@@ -3159,13 +3201,46 @@ def every_state(run_, tmp_path, env, capsys, client_here) -> dict[str, str]:
                      "root": str(alpha), "client": CLIENT}),
         ("orphan", {"action": manage_web.ORPHAN, "client": CLIENT, "key": key}),
         # The two update presses (PLAN-0021 phase 1), on a machine with
-        # nothing behind: the rehearsal and the run each say so.
+        # nothing behind: Confirm a big change says so and offers no
+        # press, and a confirm posted anyway says so on the screen it
+        # returns to (PLAN-0027 phase 3).
         ("update", {"action": manage_web.UPDATE, "root": str(alpha)}),
         ("update all", {"action": manage_web.UPDATE_ALL}),
-        ("unmount", {"action": manage_web.UNMOUNT, "root": str(alpha)}),
     ):
         pages[f"{name} plan"] = pressed(run_, fields)
         pages[f"{name} done"] = pressed(run_, fields, confirm=True)
+    # Clean up, one press from its row of Projects (PLAN-0027 phase 3).
+    pages["clean up now"] = pressed(run_, {
+        "action": manage_web.ORPHAN, "client": CLIENT, "root": str(tmp_path / "gone-too"),
+        "confirm": "yes", "from": manage_web.ROSTER})
+
+    # Each one-press change, from the screen that draws it (PLAN-0027
+    # phase 1), each undone by the next.
+    first = next(iter(sk.HARNESSES))
+    now = {"confirm": "yes", "from": manage_web.PROJECT}
+    for name, fields in (
+        ("skill off now", {"action": manage_web.SKILL_REMOVE, "root": str(alpha),
+                           "skill": SKILL, "harness": first}),
+        ("skill on now", {"action": manage_web.SKILL_ADD, "root": str(alpha),
+                          "skill": SKILL, "harness": first}),
+        ("disconnect now", {"action": manage_web.UNCONNECT, "root": str(alpha),
+                            "client": CLIENT}),
+        ("connect now", {"action": manage_web.CONNECT, "root": str(alpha),
+                         "client": CLIENT}),
+        ("refused now", {"action": manage_web.SKILL_ADD, "root": str(foreign),
+                         "skill": SKILL, "harness": first}),
+    ):
+        pages[name] = pressed(run_, {**fields, **now})
+    drop_entry(client_here, record_of(beta)["key"])
+    pages["repair from projects now"] = pressed(run_, {
+        "action": manage_web.REPAIR, "root": str(beta), "confirm": "yes",
+        "from": manage_web.ROSTER})
+
+    # Unmount last of the two-step presses: the one-press changes above
+    # stand on a mounted alpha.
+    unmount = {"action": manage_web.UNMOUNT, "root": str(alpha)}
+    pages["unmount plan"] = pressed(run_, unmount)
+    pages["unmount done"] = pressed(run_, unmount, confirm=True)
 
     # The two ways a press stops: refused, and never run at all.
     pages["refused"] = pressed(run_, {
@@ -3177,11 +3252,20 @@ def every_state(run_, tmp_path, env, capsys, client_here) -> dict[str, str]:
         "action": manage_web.UNMOUNT, "root": str(tmp_path / "never-was"),
     }, confirm=True)
 
-    # The whole reversal, on the project the walkthrough walked on, in
-    # the two presses it takes: the rehearsal and the run.
-    reversal = {"action": manage_web.REVERSAL, "root": str(fresh)}
+    # Remove from this project, on the project the walkthrough walked on:
+    # Confirm a big change with its keep box, the box's own press (the
+    # unmount alone), then the default over what is left, the skills and
+    # the connection (PLAN-0027 phase 3).
+    reversal = {"action": manage_web.REVERSAL, "root": str(fresh),
+                "from": manage_web.PROJECT}
     pages["reversal plan"] = pressed(run_, reversal)
+    pages["files removed now"] = pressed(run_, {
+        "action": manage_web.UNMOUNT, "root": str(fresh), **now})
     pages["reversed"] = pressed(run_, reversal, confirm=True)
+    # And one from Remove RadialRig's first step, which comes back there.
+    pages["removal answered"] = pressed(run_, {
+        "action": manage_web.REVERSAL, "root": str(alpha), "confirm": "yes",
+        "from": manage_web.REMOVAL})
 
     # And the two rosters a reader can be left holding.
     path = roster_file(env)
@@ -3290,12 +3374,13 @@ def test_one_amber_meaning_per_screen(
 ):
     """The colors are the packaged file's, and the amber means one thing.
 
-    On the listing the accepted wireframe draws it exactly once: the
-    press that writes. The stylesheet is shared with the setup surface,
-    whose own accepted wireframe outlines the chip on a row that touches
-    a file already standing rather than filling it, so a plan table under
-    a press here brings no second amber with it. Nothing on the page
-    paints itself, so there is no third way for the amber to appear.
+    On a redesigned screen it is the one press the screen is for: the
+    first Repair, else Update all, on Projects (Add a project on an empty
+    list); the first fix in a project's status. Continue, behind Add a
+    project, carries the amber too: it is the one press of the folder
+    field, and page.js finds it by that class. On today's plan and result
+    pages it is the press that writes, and a state that has already run
+    carries none. Nothing on the page paints itself.
     """
     css = (packaged_web() / "page.css").read_text(
         encoding="utf-8").replace("\r\n", "\n")
@@ -3310,45 +3395,47 @@ def test_one_amber_meaning_per_screen(
             assert hue not in body.lower(), name
 
     assert "button.primary { background: var(--accent-strong);" in css
-    assert ".chip.touches {\n  background: transparent;" in css
 
-    # The amber means one thing on every screen: the press that writes,
-    # or — on a view that only leads onward — the one press that view is
-    # for. A rehearsal carries its confirm, the whole-project rehearsal as
-    # much as a single verb's, which is why the view that lists the
-    # reversals carries none: each press there leads to that project's
-    # rehearsal, and the button that writes lives under it. A state that
-    # has already run carries none, and so does a refusal, which has
-    # nothing to press.
-    # An unmounted project's page carries one: the press that opens its
-    # mount plan (PLAN-0014 phase 3), the way the listing's does. The
-    # repair's rehearsal carries its confirm, and its report none.
+    def amber(page: str) -> int:
+        """The ambers on a screen, but the Continue inside the folder
+        field behind Add a project, and the keep box's press on Confirm a
+        big change, which shows only while the box is ticked, in place of
+        the default's (PLAN-0027 phase 3)."""
+        body = main_of(page).replace(
+            f'<button class="primary" type="submit">{manage_web.ADD_LABEL}</button>', "")
+        body = re.sub(r'<div class="keep-only"><form .*?</form></div>', "", body, flags=re.S)
+        return body.count(PRIMARY) + body.count('<summary class="button primary">')
+
+    wrong = []
     for name, expected in (
-        ("roster", 1), ("project", 0), ("mismatch", 0), ("unmounted", 1),
+        ("roster", 1), ("project", 0), ("mismatch", 1), ("unmounted", 1),
         ("gone", 0),
         ("walkthrough", 1), ("walkthrough done", 0), ("removal", 0),
         ("skill add plan", 1), ("skill add done", 0),
         ("unmount plan", 1), ("unmount done", 0),
         ("refused", 0), ("orphan refused", 0), ("failed", 0),
-        ("reversal plan", 1), ("reversed", 0), ("empty removal", 0),
         ("repair plan", 1), ("repaired", 0),
-        ("update plan", 1), ("update done", 0),
-        ("update all plan", 1), ("update all done", 0),
+        # Confirm a big change: its one press where it offers one. On a
+        # machine with nothing behind, neither update card offers one.
+        # Update all comes back to Projects, where the leftover row left
+        # for Clean up is the first that needs repair; after Clean up
+        # nothing on the list does.
+        ("update plan", 0), ("update done", 0),
+        ("update all plan", 0), ("update all done", 1),
+        ("reversal plan", 1), ("files removed now", 1), ("reversed", 1),
+        ("removal answered", 0), ("empty removal", 0),
+        ("clean up now", 0),
+        ("skill off now", 0), ("skill on now", 0),
+        ("disconnect now", 0), ("connect now", 0),
+        ("repair from projects now", 0), ("refused now", 1),
+        ("empty roster", 1),
     ):
-        assert pages[name].count(PRIMARY) == expected, name
-
-    # And the listing's one chip (PLAN-0014 phase 1, under the wireframe
-    # revisit the plan's Objective names): the row whose record the
-    # client contradicts carries the outlined `touches` chip and its
-    # words, and no other row carries any. The neutral chip that used to
-    # read `current` or `mismatch` on every row is gone from this screen,
-    # and the outline is the setup page's own treatment, not the amber:
-    # the amber on this screen is still the press, counted above.
-    roster = pages["roster"]
-    assert CHIP.findall(roster) == [], "a neutral chip is back on the listing"
-    assert roster.count('<span class="chip touches">') == 1
-    assert roster.count(manage_web.REPAIR_CHIP) == 1
-    assert '<span class="chip">' not in roster
+        if amber(pages[name]) != expected:
+            wrong.append((name, amber(pages[name]), expected))
+    assert wrong == []
+    # Continue is the field's one press, wherever the field is drawn.
+    assert main_of(pages["roster"]).count(
+        f'<button class="primary" type="submit">{manage_web.ADD_LABEL}</button>') == 1
 
 
 def test_dark_is_the_default(manage):
@@ -3473,3 +3560,29 @@ def test_the_pages_table_shows_record_text_visibly_and_can_send_it():
         assert hidden not in table, table.encode("utf-8", "backslashreplace")
     assert "src/app\\u202e.py" in table, table
     table.encode("utf-8")
+
+
+# --- BUG-0018: one warning for the whole repair ---------------------------
+
+def test_a_repair_while_the_client_is_open_says_to_run_the_repair_again(
+    tmp_path, env, client_here, command, capsys, manage,
+):
+    """The removal's warning names entries to delete if they come back,
+    and the registration that follows writes those same entries, so the
+    two must not stand side by side: one sentence speaks for the repair."""
+    from radialrig.tests.test_connect import plant_lock
+
+    client = cn.CLIENTS[CLIENT]
+    alpha, beta, gamma = three_projects(tmp_path, capsys, client_here)
+    root = beta.resolve()
+    keys = tuple(record_of(beta)["entries"])
+    plant_lock(client_here)
+    run_ = manage()
+
+    done = pressed(run_, {"action": manage_web.REPAIR, "root": str(root)}, confirm=True)
+    said = text_of(done)
+    assert cn.is_connected(root, CLIENT), "a warning, not a refusal"
+    assert report.repair_running_after(client) in said
+    assert report.unconnect_running_after(client, keys) not in said
+    assert report.connect_running_after(client) not in said
+    assert said.count(f"{client.label} is running") == 1

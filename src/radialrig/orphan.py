@@ -80,6 +80,7 @@ class OrphanPlan:
     found: bool                              # the key stood in one copy or more
     dispositions: tuple[mnt.Disposition, ...]
     writes: tuple[tuple[Path, bytes], ...]
+    running: bool = False                    # the client is open beside a copy this changes
 
     @property
     def removed(self) -> int:
@@ -178,6 +179,7 @@ def _remove_plan(client_name: str, key: str, *, env) -> OrphanPlan:
         client=client, key=key, found=True,
         dispositions=tuple(dispositions),
         writes=tuple(sorted(writes.items())),
+        running=cn.is_running(client, list(writes)),
     )
 
 

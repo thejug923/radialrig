@@ -520,3 +520,31 @@ def test_a_copy_that_is_not_there_is_listed_as_absent(copies, planted, capsys):
         store.as_posix(): mnt.ABSENT,
     }
     assert not store.exists()
+
+
+# --- BUG-0018: an open client can undo the removal ---------------------
+
+def test_an_open_client_gets_a_warning_on_the_orphan_removal(copies, planted, capsys):
+    from radialrig.tests.test_connect import plant_lock
+
+    client = cn.CLIENTS[CLIENT]
+    roaming, _ = copies
+    before = roaming.read_bytes()
+    lock = plant_lock(roaming)
+
+    code, rehearsal, _ = run(capsys, "unconnect", CLIENT, "--orphan", planted, "--dry-run")
+    assert code == 0
+    assert rehearsal.splitlines()[-3:-1] == [
+        report.DRY_RUN_TAIL, report.client_running_before(client)]
+
+    code, real, _ = run(capsys, "unconnect", CLIENT, "--orphan", planted)
+    assert code == 0, "a warning, not a refusal"
+    assert real.splitlines()[-2] == report.orphan_running_after(client)
+    assert RESTART not in real
+
+    # The removal needs no record, so the same command recovers an undo.
+    roaming.write_bytes(before)
+    lock.unlink()
+    # Only this copy was undone, so the other reads as left: exit 5.
+    assert run(capsys, "unconnect", CLIENT, "--orphan", planted)[0] in (0, 5)
+    assert planted not in settings_of(roaming)["mcpServers"]

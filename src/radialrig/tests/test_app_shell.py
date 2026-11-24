@@ -22,6 +22,7 @@ here, never a skip.
 
 from __future__ import annotations
 
+import argparse
 import base64
 import html
 import json
@@ -31,6 +32,7 @@ from urllib.parse import urlsplit
 
 import pytest
 
+from radialrig import cli
 from radialrig import manage_web
 from radialrig import setup_web
 
@@ -102,17 +104,30 @@ PER_PLATFORM = frozenset({
     "fail_foreign_exe",
 })
 
+# The four steps the Working card names, in order (PLAN-0027 phase 4,
+# wording.md section 4).
+STEP_NAMES = ("step_download", "step_check", "step_install", "step_start")
+
 # The exact key set of app/src/strings.json, restated rather than read.
 STRING_KEYS = frozenset({
     "_comment",
     "window_title",
     "endorsement",
+    # The toggle every redesigned screen names Details.
+    "details_label",
     "gate_head",
     "gate_lede",
     "gate_reassure",
     "gate_press_note",
     "consent_label",
     *LANDING_ROWS,
+    # The Working card's heading and sentence, the four steps' list and
+    # their names, and the Stopped card's status (PLAN-0027 phase 4).
+    "working_head",
+    "working_lede",
+    "steps_label",
+    *STEP_NAMES,
+    "stopped_status",
     # The two sentences that count the run: one while it is going, one
     # where it stopped.
     "step_running",
@@ -158,6 +173,10 @@ STRING_KEYS = frozenset({
     "swap_running",
     "swap_held",
     "swap_held_none",
+    # The heading and next step the recovery's stop takes instead of its
+    # own when the swap names programs that still hold the engine
+    # (wording.md, Screen 1, the held state; PLAN-0027 phase 4).
+    "recovery_held",
     # The update dialog, its two presses, and the four sentences a
     # failed update can end on, one per cause (PLAN-0021 phase 3,
     # prescription 3, and its review). Rust says them in native dialogs,
@@ -208,23 +227,26 @@ ARCHIVE_NAMES = {
 # The stops a second press cannot move: the bytes that arrived are the
 # bytes that will arrive again, for the uv archive and for the engine
 # package alike, and a file this app did not write stays where it is
-# until someone moves it.
-DETERMINISTIC = ("fail_checksum", "fail_package_checksum", "fail_foreign_exe")
+# until someone moves it. Each says what does move it instead.
+DETERMINISTIC = {
+    "fail_checksum": "Install a newer version of the RadialRig app",
+    "fail_package_checksum": "Install a newer version of the RadialRig app",
+    "fail_foreign_exe": "Move or delete {detail}, then reopen RadialRig.",
+}
 
-# The accepted gate, word for word. It is restated here rather than read
-# out of the file for the same reason the key set is: a test that took
-# its expectations from the file under test would pass whatever that file
-# said, and this copy is the graded content of the wireframe the owner
-# accepted.
+# The Ready card, word for word (wording.md, Screen 1, PLAN-0027 phase
+# 4). It is restated here rather than read out of the file for the same
+# reason the key set is: a test that took its expectations from the file
+# under test would pass whatever that file said.
 GATE_COPY = {
     "gate_head": "Install RadialRig",
     "gate_lede": (
-        "This sets up RadialRig, the document manager for your agents' "
-        "projects, along with the tools it runs on."),
+        "Set up RadialRig to manage your agents' project documents, along "
+        "with the tools it needs."),
     "gate_reassure": (
-        "You can take all of it back out from this app later. RadialRig "
-        "never touches your own files."),
-    "gate_press_note": "Nothing runs until this press.",
+        "Your own files stay untouched, and you can remove all of it from "
+        "this app later."),
+    "gate_press_note": "Nothing runs until you choose Install RadialRig.",
     "consent_label": "Install RadialRig",
 }
 
@@ -242,46 +264,56 @@ LANDING_COPY = {
 }
 
 # What the superseded four-block gate carried and this one may not: the
-# keys themselves, and the shapes a command-level line is written in.
+# keys themselves.
 RETIRED_KEYS = (
     "gate_uv", "gate_python", "gate_engine", "gate_path",
     "removal_order", "gate_found_uv",
 )
-COMMAND_SHAPES = (
-    "uv ", "del ", "python", "uninstall", "cache clean", "hkcu", ".exe", "%",
-)
 
-# The two sentences that count the run, and the run's own length said in
-# each of them.
+# The two sentences that count the run, and the four steps the screen
+# names said in each of them.
 STEP_SENTENCES = {
-    "step_running": "Step {detail} of 9",
-    "step_stopped": "Stopped at step {detail} of 9",
+    "step_running": "Step {detail} of 4",
+    "step_stopped": "Stopped at step {detail} of 4",
 }
 
-# The steps, in the order they run, as the filler reads them.
+# The nine keys the shell sends while a first install runs, in the order
+# they run, as the filler lists them.
 STEP_ORDER = (
     "progress_probe", "progress_download", "progress_verify",
     "progress_extract", "progress_path", "progress_install",
     "progress_resolve", "progress_version", "progress_start",
 )
 
-# The quoted detail: what the machine said, under the sentence the shell
-# says, in quotation marks rather than spliced into it.
-QUOTED_DETAIL = "The error was “{detail}”."
+# Which of the four steps each key the shell sends stands on, restated
+# from wording.md section 4. The engine swap's own line replaces the
+# engine, which is installing.
+STEP_OF = {
+    "progress_probe": 1, "progress_download": 1,
+    "progress_verify": 2,
+    "progress_extract": 3, "progress_path": 3, "progress_install": 3,
+    "progress_resolve": 3, "swap_running": 3,
+    "progress_version": 4, "progress_start": 4,
+}
 
-# Which stops quote a machine's own words under their sentence, and which
-# say something of their own there instead: two that carry no value at
-# all, one that names a file already standing, and the two that name the
-# engine's versions.
+# The line Details shows under a stop that quotes the machine's own words:
+# the words alone, behind Details, never spliced into the sentence above.
+RAW_DETAIL = "{detail}"
+
+# Which stops show the machine's own words behind Details, which show a
+# plain cause there instead, and which have nothing to add under what to
+# do next: one that names a file already standing, the Path write, and
+# the two that name the engine's versions.
 QUOTING = frozenset({
     "fail_uv_probe", "fail_download", "fail_extract", "fail_package_download",
     "fail_engine_install", "fail_recovery", "fail_tool_dir", "fail_spawn",
     "fail_line_timeout", "fail_line_unparsed", "fail_engine_stopped",
 })
-UNQUOTED = frozenset({
-    "fail_checksum", "fail_package_checksum", "fail_path_write",
-    "fail_foreign_exe", "fail_engine_old", "fail_engine_unread",
+CAUSED = frozenset({"fail_checksum", "fail_package_checksum"})
+TWO_PART = frozenset({
+    "fail_path_write", "fail_foreign_exe", "fail_engine_old", "fail_engine_unread",
 })
+UNQUOTED = CAUSED | TWO_PART
 
 # The two old-engine stops (BUG-0017): one names the version the engine
 # on the machine answered with, the other says it answered none. Both
@@ -308,66 +340,49 @@ RUST_NEEDED = "engine_needed: config::pins().engine_min_version.as_str(),"
 # one the debug build stands above the gate as a notice.
 OFF_PANEL = frozenset({"fail_picker_no_target", "fail_debug_override"})
 
-# The step each in-run stop stands on, restated here the way the order
-# above is restated, because a stop counted onto the wrong step reads as
-# a run that reached further than it did. The wireframe grades two of
-# these on its own face — the download failure at "Stopped at step 2 of
-# 9" and the checksum failure at step 3 — and the rest follow the same
-# rule: a stop stands on the step that asks the question it failed to
-# answer. A stop with no run behind it draws no count at all; that hold
-# is STOP_STEP_CHOICE above, backed by Rust keeping the reached step
-# across a stop.
-STOPPED_AT_STEP = {
-    "fail_uv_probe": "progress_probe",
-    "fail_download": "progress_download",
-    "fail_checksum": "progress_verify",
-    "fail_extract": "progress_extract",
-    "fail_path_write": "progress_path",
-    "fail_package_download": "progress_install",
-    "fail_package_checksum": "progress_install",
-    "fail_engine_install": "progress_install",
-    "fail_recovery": "progress_install",
-    "fail_foreign_exe": "progress_install",
-    "fail_tool_dir": "progress_resolve",
-    "fail_engine_old": "progress_version",
-    "fail_engine_unread": "progress_version",
-    "fail_spawn": "progress_start",
-    "fail_line_timeout": "progress_start",
-    "fail_line_unparsed": "progress_start",
-    "fail_engine_stopped": "progress_start",
-}
-
 # Every selector in the shell stylesheet that reaches for the amber, and
-# what each one is. The rule is one amber element carrying meaning per
-# screen, not one selector in the file: the gate's press, the running
-# step, the press forward from a stop a second press can move, and the
-# stopped segment on the one screen that has no press to carry it. The
-# two presses share one hover rule, the same one the engine's page gives
-# its primary press. The focus ring is the accent's one appearance that
-# says nothing.
+# what each one is. The rule is one amber element per screen, marking the
+# next thing to do, not one selector in the file: the Ready card's press,
+# the step in flight, and the press forward from a stop a second press
+# can move. A stop no press can move has no amber at all. The two presses
+# share one hover rule, the same one the engine's pages give their
+# primary press. The focus ring is the accent's one appearance that says
+# nothing.
 AMBER_SELECTORS = frozenset({
     "#consent",
     "#retry",
     "#consent:hover, #retry:hover",
-    ".steps-track .active",
-    ".steps-track .stopped-final",
+    ".progress li.current",
     ":focus-visible",
 })
 
-# The one expression that decides which mark the stopped segment takes,
-# and the one that decides whether the press forward is on screen. Read
-# together they are the hold: the amber segment is drawn exactly when the
-# press is not, so the two can never stand on one screen.
-SEGMENT_CHOICE = 'running ? "active" : (view.retry ? "stopped" : "stopped-final")'
+# The expression that decides whether the four steps are on screen, and
+# the one that decides whether the press forward is. Read together they
+# are the hold: the step in flight is drawn only while the run goes and
+# the press only on a stop, so the two can never stand on one screen.
+STEPS_CHOICE = 'show(at("progress"), running);'
 PRESS_CHOICE = 'show(at("actions"), stopped && !!view.retry);'
 
-# The one expression that decides whether a stop draws a step count at
-# all: only when the view still carries the step its run reached. Rust
-# keeps that field across a stop and clears it as each fresh pass opens,
-# so a stop from the opening look at the machine draws no count and no
-# track — a count there would name a step that never executed.
-STOP_STEP_CHOICE = (
-    'stepOf(running ? key : (view.progress ? STOPPED_AT[key] : ""))')
+# The one expression that decides which step a stop counts, and whether
+# it counts one: the step its pass reached, read off the view as it is
+# while the pass runs. Rust keeps that field across a stop and clears it
+# as each fresh pass opens, so a stop from the opening look at the
+# machine draws no count and no track, since a count there would name a
+# step that never executed. A stop's own key never chooses the step: the
+# same key is sent from more than one place in the pass, and a mapping
+# from the key counted a stop during the opening look as step 3 (PLAN-0027
+# phase 4 review R8).
+STOP_STEP_CHOICE = "var step = stepOf(view.progress);"
+
+# An engine that ends after the app was serving its pages ended no
+# installation. Its stop is the one key the shell sends only once the
+# engine has named its address, and when the pass had already finished
+# the shell had cleared its step (`Shell::done`), so a stop with that key
+# and no step draws no "Installation stopped" over it (PLAN-0027 phase 4
+# review R8).
+ENGINE_ENDED = 'var ENGINE_ENDED = "fail_engine_stopped";'
+ENDED_CHOICE = "var ended = stopped && key === ENGINE_ENDED && !view.progress;"
+STATUS_CHOICE = 'show(at("stopped-row"), stopped && !ended);'
 
 # The per-platform pair mechanism's three legs, each pinned by the line
 # that carries it. The pairs are data in the strings file; these are the
@@ -377,7 +392,7 @@ STOP_STEP_CHOICE = (
 # stayed green.
 PICKED_LINE = "var text = words ? pick(words[key]) : null;"
 PICKED_SLOT = 'var line = pick(value[slots[s].getAttribute("data-slot")]);'
-REPORT_CHOICE = "show(report, !!view.path_report);"
+REPORT_CHOICE = 'show(at("gate-details"), !!view.path_report);'
 
 # The platform values the shell sends on every picture, spelled as the
 # Rust writes them, and the pair keys the two validating readers pin.
@@ -678,6 +693,116 @@ def sweep(checked: list[tuple[str, str]]) -> None:
             assert banned not in lowered, f"{where} says '{banned}'"
 
 
+# --- prescription 5: no command, and no uv or Python ---------------------
+#
+# PLAN-0027 phase 4, and the owner's ruling of 2026-08-21: the install
+# screens say in plain words what gets set up, where it lands and how it
+# comes back out, with no command and no uv or Python detail. One rule,
+# for every sentence the strings file carries but the uninstall notice,
+# which is no install screen: it names uv, Python and the command that
+# opens Remove RadialRig, as it always has.
+#
+# It replaces two rules that disagreed. The gate's old list of command
+# shapes banned `.exe`, `%`, `hkcu` and `uninstall` anywhere in its
+# prose, and the swap and update checks banned `.exe` too, while the
+# prescription says a folder, a file name or a registry key is not a
+# command. So a word that names a place is set aside first, and what is
+# left may not name uv or Python, hold a `radialrig` command line, hold
+# a shell command, or hold a flag. The gate keeps its own placement rule
+# below: where things land is the landing rows' to say.
+SWEEP_EXEMPT = frozenset({"uninstall_notice"})
+
+# A word that names a file by its own name, such as `radialrig.exe`.
+FILE_NAME = re.compile(r"[\w.-]+\.(?:exe|json|toml|nsh|log|md)", re.I)
+# What a word may carry around a place's name in a sentence.
+TRIM = "\"'.,:;()"
+
+# The shapes a shell command is written in, and the commands a sentence
+# could tell a reader to type. The shapes are looked for in the whole
+# sentence, places and all: a backtick frames a command whatever it
+# holds, and `` `./refresh` `` is no less a command for naming a path.
+SHELL_SHAPES = ("`", "$(", "&&", "||", " | ", " > ", "cache clean")
+SHELL_WORDS = re.compile(
+    r"\b(?:del|rm|rmdir|mkdir|setx|sudo|chmod|curl|wget|powershell|cmd|bash"
+    r"|winget|pip|npm)\b", re.I)
+# A flag: a word opening with one or two dashes and a letter, and not a
+# hyphen inside a word such as a folder's name.
+FLAG = re.compile(r"(?<![\w-])--?[A-Za-z][\w-]*")
+# The same two shapes as whole words, read before any place is set
+# aside, since a flag's value can name one (`--file=./settings.json`):
+# a flag with or without its value, and a switch, which is a slash and a
+# name with no second slash in it, so `/quiet` is a switch and
+# `/home/owner` a folder.
+FLAG_WORD = re.compile(r"--?[A-Za-z][\w-]*(?:=\S*)?")
+SWITCH_WORD = re.compile(r"/[A-Za-z?][\w-]*")
+# uv's own commands. A uv named by its path, `C:\tools\uv.exe` or
+# `~/.local/bin/uv`, is a place a sentence may name; followed by one of
+# these, or uvx by anything at all, it is a command line.
+UV_COMMANDS = (
+    "add", "auth", "build", "cache", "export", "format", "help", "init",
+    "lock", "pip", "publish", "python", "remove", "run", "self", "sync",
+    "tool", "tree", "venv", "version",
+)
+UV_LINE = re.compile(
+    r"(?<![\w.-])(?:uvx(?:\.exe)?\"?\s+[\w-]"
+    rf"|uv(?:\.exe)?\"?\s+(?:{'|'.join(UV_COMMANDS)})\b)", re.I)
+
+
+def subcommands() -> frozenset[str]:
+    """The command line's own subcommands, read from its parser, so a new
+    one is refused here the day it ships."""
+    for action in cli.build_parser()._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            return frozenset(action.choices)
+    raise AssertionError("the command line has no subcommands")
+
+
+def place_name(token: str) -> bool:
+    """Whether one word names a place: a folder, a file or a registry key."""
+    bare = token.strip(TRIM)
+    return bool(bare) and (
+        "\\" in bare or "/" in bare or bare.startswith(("%", "~"))
+        or FILE_NAME.fullmatch(bare) is not None)
+
+
+def command_hit(text: str) -> str | None:
+    """What prescription 5 refuses in one sentence, said, or None.
+
+    Places are set aside only for the words that name uv, Python or a
+    shell command, which a folder or file may legitimately carry. A
+    command line, a shell shape, a flag and a switch are read in the whole
+    sentence, in any letter case, because a place inside one does not make
+    it any less a command (PLAN-0027 phase 4 review).
+    """
+    prose = " ".join(token for token in text.split() if not place_name(token))
+    lowered = prose.lower()
+    if re.search(r"\buvx?\b", lowered):
+        return "names uv"
+    if "python" in lowered:
+        return "names Python"
+    named = "|".join(sorted(re.escape(name) for name in subcommands()))
+    line = re.search(rf'\bradialrig(?:\.exe)?"?\s+(?:{named})\b', text, re.I)
+    if line:
+        return f"holds a radialrig command line: {line.group(0)}"
+    line = UV_LINE.search(text)
+    if line:
+        return f"holds a uv command line: {line.group(0)}"
+    for shape in SHELL_SHAPES:
+        if shape in text:
+            return f"reads as a shell command: {shape.strip()}"
+    found = SHELL_WORDS.search(prose)
+    if found:
+        return f"holds a shell command: {found.group(0)}"
+    for token in text.split():
+        bare = token.strip(TRIM + "`")
+        if FLAG_WORD.fullmatch(bare) or SWITCH_WORD.fullmatch(bare):
+            return f"holds a flag: {bare}"
+    found = FLAG.search(prose)
+    if found:
+        return f"holds a flag: {found.group(0)}"
+    return None
+
+
 # --- item 1: the keys --------------------------------------------------
 
 def test_the_strings_file_carries_exactly_the_keys_the_shell_reads(strings):
@@ -723,14 +848,15 @@ def test_the_strings_file_carries_exactly_the_keys_the_shell_reads(strings):
         assert len(named) <= 1, where
         assert not named or named == {"detail"}, where
 
-    # The two stops a press cannot move say what does move them instead
-    # of offering the control every other failure pairs with — on every
+    # The stops a press cannot move say what does move them instead of
+    # offering the control every other failure pairs with — on every
     # platform the sentence is written for.
-    for key in DETERMINISTIC:
+    for key, moves in DETERMINISTIC.items():
         for where, text in walk(strings[key], key):
+            assert "try again" not in text.lower(), where
             assert "retry" not in text.lower(), where
-            assert "changes this" in text, where
-    assert strings["retry_label"].strip()
+            assert moves in text, where
+    assert strings["retry_label"] == "Try again"
 
 
 # --- item 2: who typed a change ----------------------------------------
@@ -764,14 +890,16 @@ def test_the_shell_words_hold(strings):
 # --- item 4: the endorsement -------------------------------------------
 
 def test_the_endorsement_is_said_once_on_the_shell_surface(strings, markup):
-    """Once on the screen, in the masthead, beside the name.
+    """Once on the screen, in the masthead, reading on from the name.
 
-    The literal is the engine's own constant. The markup carries none of
-    it: the endorsement is a slot like every other sentence, filled from
-    the strings file at runtime, so the file is the only place it lives.
-    Where the slot sits is the part the markup does own, and R3 reads the
-    first-mention rule the way the engine's own masthead passes it —
-    name and endorsement inside one header element.
+    The literal is the engine's own constant, so the app and the engine's
+    pages say one endorsement. The markup carries none of it: the
+    endorsement is a slot like every other sentence, filled from the
+    strings file at runtime, so the file is the only place it lives.
+    Where the slot sits is the part the markup does own: wording.md's
+    shared chrome has the masthead read "RadialRig, a Radial 47 product"
+    inline (PLAN-0027 phase 4), so the name's slot and the endorsement's
+    stand side by side, with nothing between them, in one header element.
     """
     said = read(SHELL_SRC / "strings.json")
     assert said.count(setup_web.ENDORSEMENT) == 1
@@ -780,21 +908,22 @@ def test_the_endorsement_is_said_once_on_the_shell_surface(strings, markup):
         if setup_web.ENDORSEMENT in text
     ] == ["endorsement"]
     assert markup.count(setup_web.ENDORSEMENT) == 0
+    assert strings["endorsement"] == setup_web.ENDORSEMENT == ", a Radial 47 product"
+    assert (strings["window_title"] + strings["endorsement"]
+            == "RadialRig, a Radial 47 product")
 
-    # The first mention rule the engine's own surfaces pass: the name and
-    # the endorsement stand together on the screen a reader opens.
     surface = reads_as(markup)
     assert surface, "the bootstrap screen shows nothing at all"
-    assert "RadialRig" in surface
-    assert "Radial 47" in strings["endorsement"]
 
     head = MASTHEAD.search(markup)
     assert head is not None, "the masthead is gone"
-    assert 'data-key="endorsement"' in head.group(1)
-    # The owner's ruling on the name this surface wears: the window is
-    # RadialRig, and the screen in front of the reader is its installer.
-    assert "<h1>RadialRig Installer</h1>" in head.group(1)
+    assert ('<span class="name" data-key="window_title"></span>'
+            '<span class="endorse" data-key="endorsement"></span>') in head.group(1)
     assert markup.count('data-key="endorsement"') == 1
+    # The name is the window's own, and the screen's heading is no second
+    # name: the install card's heading says what the screen does.
+    assert "<h1" not in head.group(1)
+    assert "Installer" not in markup
 
 
 # --- item 5: the gate ---------------------------------------------------
@@ -830,11 +959,14 @@ def test_the_gate_says_what_it_sets_up_where_it_lands_and_that_it_comes_out(
     assert "uv tool uninstall" not in said
     assert "uv python uninstall" not in said
 
-    # The gate's own prose carries no command, no uv or Python detail, and
-    # no registry key. It is one screen of plain words.
-    prose = " ".join(GATE_COPY[key] for key in GATE_COPY).lower()
-    for shape in COMMAND_SHAPES:
-        assert shape not in prose, shape
+    # The gate's own prose carries no command and no uv or Python detail
+    # (prescription 5's one rule), and it names no folder, file or key:
+    # where things land is the two landing rows' to say. It is one screen
+    # of plain words.
+    for key in GATE_COPY:
+        hit = command_hit(strings[key])
+        assert hit is None, f"{key} {hit}"
+        assert not any(place_name(word) for word in strings[key].split()), key
 
     # Both landing places are paths, one per platform: a root the reader
     # already has a name for, a separator, and no verb in front of
@@ -896,12 +1028,29 @@ def test_the_filler_writes_the_rows_and_draws_no_unfillable_line(markup):
         "the filler fills a slot it has nothing for")
     assert 'return "";' in filler.group(0), (
         "an unfillable line still reaches the screen")
+    # The sentence's own spacing is tidied before a value goes in, and the
+    # value goes in as it came: a path with two spaces in a row, or an
+    # error over several lines, is drawn as the machine has it. A tidy
+    # after the fill rewrote both (PLAN-0027 phase 4 review R9).
+    body = filler.group(0)
+    tidied = body.index('text = text.replace(/\\s+/g, " ").trim();')
+    assert tidied < body.index("split(NEEDED)"), "the needed version is tidied"
+    assert tidied < body.index("split(SLOT)"), "the value is tidied"
+    assert body.count(".replace(") == 1 and body.count(".trim(") == 1
+    assert body.rstrip().endswith("return text;\n  }"), "the filled line is changed on its way out"
+    # And the screen keeps the spacing: every element a value lands in
+    # draws its spaces and line breaks as they are.
+    css = read(SHELL_SRC / "styles.css")
+    kept = re.search(r"\n([^{}\n]+)\{\s*white-space: pre-wrap;\s*\}", css)
+    assert kept is not None, "a value's spacing is collapsed on screen"
+    assert {part.strip() for part in kept.group(1).split(",")} == {
+        "#saying", ".drawer p", ".notice"}
 
-    # The two halves of a failure sentence are split where the file
-    # splits them, not composed here.
-    halves = re.search(r"\n  function lines\(.*?\n  \}\n", script, re.S)
-    assert halves is not None, "the two-line reader is gone"
-    assert 'split("\\n")' in halves.group(0)
+    # The parts of a failure sentence are split where the file splits
+    # them, not composed here.
+    parts = re.search(r"\n  function lines\(.*?\n  \}\n", script, re.S)
+    assert parts is not None, "the line reader is gone"
+    assert 'split("\\n")' in parts.group(0)
 
     # And the markup keeps the empty slots the filler writes into.
     assert markup.count('data-slot="label"') == len(LANDING_COPY)
@@ -969,16 +1118,19 @@ def test_the_old_engine_stop_names_both_versions(strings):
     assert RUST_NEEDED in rust, "the view no longer sends the engine floor"
 
 
-def test_the_panel_counts_the_steps_and_quotes_what_the_machine_said(
+def test_the_card_counts_four_steps_and_keeps_the_machines_words_in_details(
     strings, markup,
 ):
-    """Step 2 of 9, a track that draws it, and the detail in quotes.
+    """Four steps on the Working card, and a stop that says what to do.
 
-    The count is said in one sentence per state and drawn in one segment
-    per step, and the length of the run is pinned to the number of steps
-    the strings file names. A stop says one sentence and, under it, what
-    the machine said — quoted, never spliced into the sentence, so a
-    reader can tell the app's words from the error's.
+    PLAN-0027 phase 4, prescription 2. The shell still sends one of nine
+    keys as the run goes; the screen groups them into four plain steps,
+    Downloading, Checking the download, Installing and Starting, by
+    wording.md section 4's table, and names the step's number only behind
+    Details. A stop says what happened and what to do next, and keeps the
+    machine's own words, unquoted and never spliced into the sentence,
+    behind Details too, so a reader can tell the app's words from the
+    error's.
     """
     steps = sorted(key for key in strings if key.startswith("progress_"))
     assert len(steps) == len(STEP_ORDER)
@@ -987,63 +1139,97 @@ def test_the_panel_counts_the_steps_and_quotes_what_the_machine_said(
     for key, said in STEP_SENTENCES.items():
         assert strings[key] == said, key
         assert said.count("{detail}") == 1, key
-        assert f"of {len(steps)}" in said, key
+        assert f"of {len(STEP_NAMES)}" in said, key
+    assert [strings[key] for key in STEP_NAMES] == [
+        "Downloading", "Checking the download", "Installing", "Starting"]
 
-    # One segment per step, in the markup, so the track cannot be built
-    # to a different length than the sentence beside it says.
-    track = re.search(r'<div class="steps-track"[^>]*>(.*?)</div>', markup, re.S)
-    assert track is not None, "the segment track is gone"
-    assert track.group(1).count("<span></span>") == len(steps)
-    assert track.group(1).replace("<span></span>", "").strip() == ""
+    # One item per step, in the markup, in order, so the list cannot be
+    # built to a different length than the sentence in Details says.
+    listed = re.search(r'<ol class="progress"[^>]*>(.*?)</ol>', markup, re.S)
+    assert listed is not None, "the four steps are gone"
+    assert tuple(re.findall(r'<li data-key="([^"]+)"></li>', listed.group(1))) == STEP_NAMES
+    assert 'data-label="steps_label"' in markup
 
     script = read(SHELL_SRC / "bootstrap.js")
-    listed = re.search(r"var STEPS = \[(.*?)\];", script, re.S)
-    assert listed is not None, "the step order is gone from the filler"
-    assert tuple(re.findall(r'"([^"]+)"', listed.group(1))) == STEP_ORDER
+    order = re.search(r"var STEPS = \[(.*?)\];", script, re.S)
+    assert order is not None, "the step order is gone from the filler"
+    assert tuple(re.findall(r'"([^"]+)"', order.group(1))) == STEP_ORDER
+    names = re.search(r"var STEP_NAMES = \[(.*?)\];", script, re.S)
+    assert names is not None, "the four steps are gone from the filler"
+    assert tuple(re.findall(r'"([^"]+)"', names.group(1))) == STEP_NAMES
 
-    # Every stop the panel draws belongs to a step, and the step it
-    # belongs to is the one this file names for it. Naming only "a step of
-    # the nine" would let two stops trade places and still pass, and the
-    # number on the screen would then count a step that never ran.
-    stopped = re.search(r"var STOPPED_AT = \{(.*?)\};", script, re.S)
-    assert stopped is not None, "no stop knows which step it belongs to"
-    placed = dict(re.findall(r'(\w+): "([^"]+)"', stopped.group(1)))
+    # Every key the shell sends while a run goes stands on the step
+    # wording.md gives it, the engine swap's own line among them.
+    grouped = re.search(r"var STEP_OF = \{(.*?)\};", script, re.S)
+    assert grouped is not None, "no key knows which step it belongs to"
+    mapped = {key: int(step) for key, step in re.findall(r"(\w+): (\d)", grouped.group(1))}
+    assert mapped == STEP_OF, set(mapped.items()) ^ set(STEP_OF.items())
+    assert frozenset(STEP_ORDER) | {"swap_running"} == frozenset(STEP_OF)
+    # And in the order they run: the count never goes backwards.
+    counted = [STEP_OF[key] for key in STEP_ORDER]
+    assert counted == sorted(counted) and set(counted) == {1, 2, 3, 4}
+
+    # A stop counts the step its pass reached, the same way the run
+    # counts it, and no failure key carries a step of its own: a key the
+    # pass sends from two places would otherwise count the earlier one as
+    # the later step (PLAN-0027 phase 4 review R8).
+    assert STOP_STEP_CHOICE in script, "a stop counts a step its pass never reached"
+    assert "STOPPED_AT" not in script, "a stop's key still chooses its step"
     panelled = frozenset(
         key for key in strings if key.startswith("fail_")) - OFF_PANEL
     assert panelled == QUOTING | UNQUOTED, panelled ^ (QUOTING | UNQUOTED)
-    assert frozenset(placed) == panelled, frozenset(placed) ^ panelled
-    assert frozenset(STOPPED_AT_STEP) == panelled, (
-        frozenset(STOPPED_AT_STEP) ^ panelled)
-    for key, step in STOPPED_AT_STEP.items():
-        assert step in STEP_ORDER, key
-        assert placed[key] == step, (
-            f"{key} stands on {placed[key]}, not {step}")
+    assert not QUOTING & CAUSED and not QUOTING & TWO_PART and not CAUSED & TWO_PART
 
-    # The two the wireframe grades on its own face, counted the way it
-    # counts them: step 2 for the download, step 3 for the checksum.
-    assert STEP_ORDER.index(STOPPED_AT_STEP["fail_download"]) + 1 == 2
-    assert STEP_ORDER.index(STOPPED_AT_STEP["fail_checksum"]) + 1 == 3
+    # The two stops the mockups grade on their own face are counted where
+    # they stand because the Rust names each one's step just before it:
+    # the download at step 1, the check at step 2.
+    rust = read(RUST_SRC / "bootstrap.rs")
+    supply = rust.split("pub fn provide_uv(", 1)[1].split("\n}\n", 1)[0]
+    assert (supply.index("step(strings::PROGRESS_DOWNLOAD);")
+            < supply.index("download(pins)?")
+            < supply.index("step(strings::PROGRESS_VERIFY);")
+            < supply.index("verify(&bytes, pins.archive_sha256())?"))
+    assert STEP_OF["progress_download"] == 1 and STEP_OF["progress_verify"] == 2
 
-    # Two lines per stop the panel draws — on every platform the stop is
-    # written for: the sentence, and what more there is to say under it.
+    # An engine that ended after the app was serving its pages draws its
+    # stop with no "Installation stopped" over it; every other stop keeps
+    # the status.
+    assert ENGINE_ENDED in script, "the engine's own ending is not told apart"
+    assert ENDED_CHOICE in script, "an engine that ended after its pages reads as an install"
+    assert STATUS_CHOICE in script, "the status shows on an engine that ended after its pages"
+    assert "fail_engine_stopped" in QUOTING
+
+    # Every stop the card draws says what happened, then what to do next,
+    # on every platform the stop is written for. The eleven that carry a
+    # machine's own words put them, and only them, in a third part for
+    # Details; the two checksums put a plain cause there; the rest have
+    # nothing to add.
     for key in panelled:
         for where, text in walk(strings[key], key):
-            head, sep, under = text.partition("\n")
-            assert sep, where
-            assert head.strip() and under.strip(), where
-            assert "\n" not in under, where
-
-    # The eleven that quote a machine's own words quote them the one way.
+            parts = text.split("\n")
+            assert all(part.strip() for part in parts), where
+            assert len(parts) == (2 if key in TWO_PART else 3), where
+            assert "{detail}" not in parts[0], where
     for key in QUOTING:
         for where, text in walk(strings[key], key):
-            head, _, under = text.partition("\n")
-            assert "{detail}" not in head, where
-            assert under == QUOTED_DETAIL, where
+            assert text.split("\n")[2] == RAW_DETAIL, where
+            assert "{detail}" not in text.split("\n")[1], where
+    for key in CAUSED:
+        cause = strings[key].split("\n")[2]
+        assert "{" not in cause and cause.endswith("did not match what this app expected."), key
 
-    # The two the panel never draws stay one line, because Rust renders
-    # one of them whole and the other stands above the gate as a notice.
+    # The two the card never draws stay one line, because Rust renders
+    # one of them whole and the other stands above the Ready card as a
+    # notice.
     for key in OFF_PANEL:
         assert "\n" not in strings[key], key
+
+    # The Working card's own words, and the Stopped card's status.
+    assert strings["working_head"] == "Installing RadialRig"
+    assert strings["working_lede"] == "RadialRig is installing the tools it needs."
+    assert strings["steps_label"] == "Installation progress"
+    assert strings["stopped_status"] == "Installation stopped"
+    assert strings["details_label"] == "Details"
 
 
 # --- item 6: what a shell string may not name --------------------------
@@ -1291,7 +1477,11 @@ MEASURE = re.compile(
 
 # The only bare words a color-bearing declaration may use. None of them
 # is a named color, which is the point: a named color has to fail.
-ALLOWED_WORDS = frozenset({"solid", "none", "transparent", "inherit", "block"})
+# `currentcolor` is the element's own text color, which is a token too, so
+# it invents nothing (a status mark's outline and Details' arrow draw in
+# it, as on the engine's pages).
+ALLOWED_WORDS = frozenset({
+    "solid", "none", "transparent", "inherit", "block", "currentcolor"})
 
 # Which declarations can carry a color at all. Every custom property is
 # in, because a token is where the colors of this file actually live.
@@ -1420,16 +1610,16 @@ def test_the_shell_colors_are_the_packaged_ones_and_the_amber_means_one_thing(
 ):
     """The window is painted in the engine's palette, and the amber is one thing.
 
-    Two pins ported from the engine's own page: no color is invented for
-    this window, and the amber says one thing per screen. On the gate it
-    is the press that agrees. While the run is going it is the step in
-    flight. On a stop a second press can move it is the press forward,
-    and on a stop no press can move it is the segment the run stopped on,
-    because there is no press on that screen to carry it.
+    Two pins ported from the engine's own pages: no color is invented for
+    this window, and the amber says one thing per screen, the next thing
+    to do (PLAN-0027's look). On the Ready card it is the press that
+    agrees. While the run is going it is the step in flight. On a stop a
+    second press can move it is the press forward, and a stop no press can
+    move has none, because there is nothing to press.
 
-    One element per screen, not one selector in the file: the two screens
-    that could hold two are held apart by the filler, which draws the
-    amber segment exactly when it does not draw the press.
+    One element per screen, not one selector in the file: the Working and
+    Stopped states share a card, and the filler draws the steps only while
+    the run goes and the press only on a stop, so no screen shows both.
     """
     css = read(SHELL_SRC / "styles.css")
     packaged = read(PAGE_CSS)
@@ -1464,23 +1654,30 @@ def test_the_shell_colors_are_the_packaged_ones_and_the_amber_means_one_thing(
     assert markup.count('<button') == markup.count('type="button"')
     assert markup.count('<button') == 2
 
-    # The gate holds the press that agrees and nothing else that could
-    # take the amber; the panel holds the other press and the track.
-    gate = re.search(r'<section class="gate">(.*?)</section>', markup, re.S)
-    assert gate is not None, "the gate panel is gone"
+    # The Ready card holds the press that agrees and nothing else that
+    # could take the amber; the other card holds the other press and the
+    # steps.
+    gate = re.search(r'<section class="card" id="state-gate"[^>]*>(.*?)</section>',
+                     markup, re.S)
+    assert gate is not None, "the Ready card is gone"
     assert 'id="consent"' in gate.group(1)
     assert 'id="retry"' not in gate.group(1)
-    assert "steps-track" not in gate.group(1)
+    assert 'class="progress"' not in gate.group(1)
+    status = re.search(r'<section class="card" id="state-status"[^>]*>(.*?)</section>',
+                       markup, re.S)
+    assert status is not None, "the Working and Stopped card is gone"
+    assert 'id="retry"' in status.group(1) and 'class="progress"' in status.group(1)
 
-    # And the filler draws the amber segment exactly when there is no
-    # press forward to carry it, so no screen ever shows both.
+    # And the filler draws the step in flight only while the run goes and
+    # the press forward only on a stop, so no screen ever shows both.
     script = read(SHELL_SRC / "bootstrap.js")
-    assert SEGMENT_CHOICE in script, "the stopped segment picks its own mark"
+    assert STEPS_CHOICE in script, "the steps show on their own terms"
     assert PRESS_CHOICE in script, "the press forward shows on its own terms"
+    assert 'var running = view.phase === "running" && !view.failure;' in script
+    assert "var stopped = !!view.failure;" in script
     assert STOP_STEP_CHOICE in script, (
         "a stop counts a step only for a run that happened")
-    assert script.count('"stopped-final"') == 1
-    assert script.count('"active"') == 1
+    assert script.count('"current"') == 1
 
 
 # --- D14: the one name, in the four places Tauri needs it --------------
@@ -1884,16 +2081,18 @@ SWAP_KEYS = ("swap_running", "swap_held", "swap_held_none")
 
 # The line that draws the give-up's added sentence, and the element it
 # draws into.
-HELD_CHOICE = 'show(at("held"), !!held);'
+HELD_CHOICE = 'show(at("held"), stopped && !!held);'
+
+# The give-up that names programs heads its stop with what holds the
+# engine rather than with the recovery's own heading.
+HELD_HEADING = 'var named = view.held && view.held.key === HELD_BY_NAME;'
 
 
 def plain_words(where: str, text: str) -> None:
-    """Constraint 4: no command, and no uv or Python detail."""
-    lowered = text.lower()
-    assert re.search(r"\buv\b", lowered) is None, f"{where} names uv"
-    assert "python" not in lowered, f"{where} names Python"
-    assert ".exe" not in lowered, f"{where} names a program file"
-    assert "`" not in text and " --" not in text, f"{where} reads as a command"
+    """Constraint 4, as prescription 5's one rule reads it: no command,
+    and no uv or Python detail."""
+    hit = command_hit(text)
+    assert hit is None, f"{where} {hit}"
 
 
 def test_the_swap_says_what_it_does_and_what_still_holds_the_engine(
@@ -1901,19 +2100,24 @@ def test_the_swap_says_what_it_does_and_what_still_holds_the_engine(
 ):
     """Decided 7 and prescription 4, as the screen says them.
 
-    While the swap runs, the screen says in plain words that programs
-    using RadialRig lose it for a moment and may need to reconnect. The
-    line is not one of the nine steps, so it draws no count. When the
-    swap gives up, its stop carries one added sentence: the programs that
-    still hold the engine, by file name, or that none was found running
-    from the engine's folders and some other program may have a file open
+    While the swap runs, the Working card takes the swap's own heading
+    and sentence, which say in plain words that programs using RadialRig
+    lose it for a moment and may need to reconnect; its step is
+    Installing (PLAN-0027 phase 4). When the swap gives up, its stop
+    carries one added sentence behind Details: the programs that still
+    hold the engine, by file name, or that none was found running from
+    the engine's folders and some other program may have a file open
     there. The give-up stands on the recovery's own sentence, which must
     not claim the engine was taken out, because a give-up can come from an
-    uninstall that could not take it out.
+    uninstall that could not take it out. Where it names programs, its
+    heading says another program is using RadialRig, and what to do next
+    says what Try again does about them, closing nothing (the rule of the
+    test after this one).
     """
     running = strings["swap_running"]
     head, sep, under = running.partition("\n")
-    assert sep and head.strip() and under.strip()
+    assert sep and head.strip() and under.strip() and "\n" not in under
+    assert head == "Replacing an older version"
     assert "programs that use radialrig" in under.lower()
     assert "lose it for a moment" in under
     assert "reconnect" in under
@@ -1927,10 +2131,23 @@ def test_the_swap_says_what_it_does_and_what_still_holds_the_engine(
     assert re.findall(r"\{([^{}]*)\}", held) == ["detail"]
     none = strings["swap_held_none"]
     assert "\n" not in none and "{" not in none
-    assert "no program" in none.lower()
-    assert "may have a file open" in none
+    assert "no radialrig program" in none.lower()
+    assert "may still have a file open" in none
 
-    for key in SWAP_KEYS:
+    named = strings["recovery_held"]
+    heading, sep, next_step = named.partition("\n")
+    assert sep and "\n" not in next_step and "{" not in named
+    assert heading == "Another program is using RadialRig."
+    assert strings["retry_label"] in next_step
+    # The swap asks each program to stop before each attempt and goes on
+    # whether or not it stopped (`swap_engine_with`, `holders::stop`), so
+    # the line promises the try and not the outcome (PLAN-0027 phase 4
+    # review R1).
+    assert "try to stop the programs listed in Details" in next_step
+    assert "before each attempt" in next_step
+    assert "will stop" not in next_step
+
+    for key in (*SWAP_KEYS, "recovery_held"):
         plain_words(key, strings[key])
     recovery = strings["fail_recovery"].partition("\n")[0]
     assert "was taken out" not in recovery
@@ -1943,16 +2160,19 @@ def test_the_swap_says_what_it_does_and_what_still_holds_the_engine(
         constant = key.upper()
         assert re.search(rf"\n    {constant},\n", rust), f"{constant} is not emitted"
 
-    # The page draws the added sentence in its own line, under the detail,
-    # and only on a stop.
+    # The page draws the added sentence in its own line behind Details,
+    # after the step and before the machine's own words, and only on a
+    # stop; the swap's line takes the Working card's heading.
     script = read(SHELL_SRC / "bootstrap.js")
     assert HELD_CHOICE in script, "the added sentence is never drawn"
-    assert "stopped && view.held" in script
-    assert '<div class="status">' in markup, "the status panel is gone"
-    panel = markup.split('<div class="status">', 1)[1].split('id="actions"', 1)[0]
+    assert HELD_HEADING in script, "a give-up that names programs keeps its old heading"
+    assert 'var HELD_STOP = "recovery_held";' in script
+    assert 'var SWAP = "swap_running";' in script
+    assert '<section class="card" id="state-status"' in markup, "the card is gone"
+    drawer = markup.split('id="status-details"', 1)[1].split("</details>", 1)[0]
     assert markup.count('id="held"') == 1
-    assert '<p class="detail" id="held" hidden></p>' in panel
-    assert panel.index('id="detail"') < panel.index('id="held"')
+    assert '<p class="said" id="held" hidden></p>' in drawer
+    assert drawer.index('id="step-label"') < drawer.index('id="held"') < drawer.index('id="detail"')
 
 
 # A sentence that tells the reader to close something, in any form.
@@ -2012,6 +2232,57 @@ def test_the_folder_stop_is_true_for_both_folders_and_names_no_uv(strings):
     assert "installs commands into" not in said
     assert "folders" in head
     plain_words("fail_tool_dir", said)
+
+
+# The assurance a stop may give only when nothing before it wrote.
+UNCHANGED = re.compile(r"\bnothing (?:was |has )?changed\b", re.I)
+
+
+def test_the_foreign_file_stop_promises_nothing_it_cannot_keep(strings):
+    """The refusal of a program file this app didn't write, on both
+    platforms (PLAN-0027 phase 4 review R2).
+
+    It used to say "Nothing was changed". It can follow writes: an
+    engine swap's attempt that took the engine's entry out before the next
+    look found a stranger's file in its place, and a first install that
+    put the support tools in place before the second ownership check
+    could look in their real launcher folder (`bootstrap.rs`, `work` and
+    `swap_engine_with`). So it says what stands there and what moves it,
+    and no assurance.
+    """
+    for where, text in walk(strings["fail_foreign_exe"], "fail_foreign_exe"):
+        assert not UNCHANGED.search(text), where
+        assert DETERMINISTIC["fail_foreign_exe"] in text, where
+    rust = read(RUST_SRC / "bootstrap.rs")
+    work = rust.split("fn work(", 1)[1].split("\n}\n", 1)[0]
+    # The second ownership check stands after the support tools' step.
+    assert work.index("provide_uv(") < work.index(
+        "settled = guard_engine(Some(&uv), &dir, data.as_deref())?;")
+
+
+def test_the_package_stop_is_true_for_a_download_and_for_a_save(strings):
+    """The engine package's one stop, for both of its causes
+    (PLAN-0027 phase 4 review R7).
+
+    `stage_package` sends `fail_package_download` when the download
+    doesn't arrive and when the downloaded package can't be written into
+    the app's own folder. The sentence used to speak of the download
+    alone and send the reader to their internet connection, so a full or
+    read-only folder read as a network fault. It names both now, and
+    what to check for each.
+    """
+    rust = read(RUST_SRC / "bootstrap.rs")
+    staged = rust.split("pub fn stage_package(", 1)[1].split("\n}\n", 1)[0]
+    for cause in ("fetch(&client, address)", "std::fs::create_dir_all(&into)",
+                  "write_new(&staged.at, &bytes)"):
+        after = staged.split(cause, 1)[1].split(";", 1)[0]
+        assert "strings::FAIL_PACKAGE_DOWNLOAD" in after, cause
+
+    head, then, raw = strings["fail_package_download"].split("\n")
+    assert "download" in head.lower() and "save" in head.lower(), head
+    assert "internet connection" in then and "writable" in then, then
+    assert raw == RAW_DETAIL
+    plain_words("fail_package_download", strings["fail_package_download"])
 
 
 # --- the step counter's pacing (reports/release-0.1.4-2026-08-23) ------
@@ -2285,19 +2556,27 @@ UPDATE_FAILED = (
     "update_failed_download", "update_failed_signature",
     "update_failed_version", "update_failed_install")
 UPDATE_KEYS = (UPDATE_READY, "update_now", "update_later", *UPDATE_FAILED)
-NOT_INSTALLED = "The update was not installed, and nothing changed."
+NOT_INSTALLED = "The update wasn't installed, and nothing changed."
+# The one failure that comes after a change: by the time the install
+# fails, the plugin has written the installer out, and on Windows the
+# app's hook has closed the engine's page and hidden the window
+# (`update.rs`, `ask`; tauri-plugin-updater 2.12.0, `install_inner`). So
+# it says the update wasn't installed and no more (PLAN-0027 phase 4
+# review R3).
+CHANGED_BEFORE = {"update_failed_install": "The update wasn't installed."}
 
 
 def test_the_update_dialog_names_both_versions_and_says_what_updating_does(
     strings,
 ):
-    """Prescription 3, in the dialog's own words.
+    """Prescription 3, in the dialog's own words (wording.md section 4,
+    PLAN-0027 phase 4).
 
-    The dialog says RadialRig <new> is ready, that this is <current>, and
-    that updating closes RadialRig, installs the new version and opens it
-    again. Its two presses are "Update now" and "Later". A failure says
-    the update was not installed, that nothing changed, and why, in plain
-    words: no command, no uv or Python, and no machine error quoted, since
+    The dialog says RadialRig <new> is available, that the reader has
+    <current>, and that updating closes RadialRig, installs the new
+    version and reopens it. Its two presses are "Update now" and "Later". A failure says
+    the update was not installed, that nothing changed where nothing had,
+    and why, in plain words: no command, no uv or Python, and no machine error quoted, since
     a network library's message names hosts and parts a reader does not
     know. Rust shows all of them in native dialogs, so Rust names every
     key and reads every sentence (no page renders them).
@@ -2305,16 +2584,18 @@ def test_the_update_dialog_names_both_versions_and_says_what_updating_does(
     ready = strings[UPDATE_READY]
     head, sep, under = ready.partition("\n")
     assert sep and "\n" not in under
-    assert head == "RadialRig {detail} is ready. This is RadialRig {current}."
+    assert head == "RadialRig {detail} is available. You have {current}."
     assert under == (
-        "Updating closes RadialRig, installs the new version and opens it again.")
+        "Updating closes RadialRig, installs the new version, and reopens it.")
     assert strings["update_now"] == "Update now"
     assert strings["update_later"] == "Later"
 
     for key in UPDATE_FAILED:
         said = strings[key]
         head, sep, under = said.partition("\n")
-        assert head == NOT_INSTALLED, key
+        assert head == CHANGED_BEFORE.get(key, NOT_INSTALLED), key
+        if key in CHANGED_BEFORE:
+            assert not UNCHANGED.search(said), key
         assert sep and under.strip() and "\n" not in under, key
         assert "{" not in said, key
         assert "error was" not in said.lower(), key
@@ -2331,3 +2612,109 @@ def test_the_update_dialog_names_both_versions_and_says_what_updating_does(
         assert f'"{key}"' in rust, key
         assert re.search(rf"\n    {key.upper()},\n", rust), f"{key} is not emitted"
         assert re.search(rf"\n    pub {key}: String,\n", rust), f"{key} is not read"
+
+
+# --- PLAN-0027 phase 4, prescription 5: the sweep -------------------------
+
+def test_no_install_screen_sentence_names_uv_or_python_or_holds_a_command(
+    strings,
+):
+    """Prescription 5: every sentence the strings file carries, but one.
+
+    No value may name uv or Python, or hold a command: a `radialrig` or
+    `uv` command line, a shell command, or a flag. A folder, a file name or
+    a registry key is not a command, so the two landing folders, a
+    `radialrig.exe` and a registry key pass. The uninstall notice is
+    not an install screen and the sweep leaves it out; it names uv, Python
+    and the command that opens Remove RadialRig, as it always has.
+    """
+    checked = [
+        (where, text) for where, text in walk(strings)
+        if where.split(".")[0] not in SWEEP_EXEMPT
+    ]
+    assert len(checked) > 60, "the sweep reads almost nothing"
+    for where, text in checked:
+        hit = command_hit(text)
+        assert hit is None, f"{where} {hit}"
+
+    notice = strings["uninstall_notice"]
+    assert command_hit(notice) is not None, "the exemption spares nothing"
+    assert re.search(r"\buv\b", notice) and "Python" in notice
+    assert "run {detail} manage and open Remove RadialRig" in notice
+
+    # The sweep is a sweep: it refuses each shape a command is written in,
+    # and it lets through each place a sentence may name.
+    refused = (
+        "Run radialrig manage to see it.",
+        "Run \"C:\\a\\radialrig.exe\" setup there.",
+        "Type uv tool uninstall radialrig.",
+        "Then uvx runs it.",
+        "This needs Python 3.13.",
+        "Start it with --no-browser.",
+        "Type del %USERPROFILE%\\.local\\bin\\uv.exe first.",
+        "Run `whoami` now.",
+        "Pipe it: a | b.",
+        # The review's probes (PLAN-0027 phase 4 review R5): a command
+        # line in any letter case, a uv named by its path, a flag that
+        # carries a path, a slash switch, and a command in backticks
+        # that names a path.
+        "RADIALRIG manage",
+        "Run RadialRig Manage to see it.",
+        "C:\\tools\\uv.exe tool uninstall radialrig",
+        "Run \"C:\\tools\\uv.exe\" tool list first.",
+        "~/.local/bin/uv tool list",
+        "Start it with --file=./settings.json.",
+        "Start it with --name=value.",
+        "Start it with --name.",
+        "Run it with /quiet.",
+        "Try `./refresh`.",
+    )
+    for said in refused:
+        assert command_hit(said) is not None, said
+    passed = (
+        "%USERPROFILE%\\.local\\bin",
+        "%APPDATA%\\uv",
+        "~/.local/share/uv",
+        "~/.local/bin",
+        "Another radialrig.exe is already installed.",
+        "Another radialrig command is already installed.",
+        "The entry is {detail}, under HKCU\\Environment.",
+        "HKCU\\Environment",
+        "Move or delete .\\radialrig.exe, then reopen RadialRig.",
+        ".\\radialrig.exe",
+        "Your PATH doesn't include /home/owner/.local/bin.",
+        "Set up RadialRig to manage your agents' project documents.",
+        "A folder named pit-wall stays.",
+    )
+    for said in passed:
+        assert command_hit(said) is None, said
+    # The command line's own subcommands are what a command line is read
+    # by, so a new one is refused the day it ships.
+    assert {"manage", "setup", "upgrade", "connect"} <= subcommands()
+
+
+# --- PLAN-0027 phase 4: the window check's app half ----------------------
+
+APP_FLOW = ROOT / "reports" / "ui-redesign-2026-11" / "tools" / "app_flow.mjs"
+
+
+# The window check's tools stay in the workshop, so the public tree has no
+# app_flow.mjs to read.
+@pytest.mark.skipif(not APP_FLOW.is_file(),
+                    reason="the window check's tools are not in this checkout")
+def test_the_window_check_counts_page_errors_from_before_a_state_is_drawn():
+    """An error the page throws while it draws a state fails that state
+    (PLAN-0027 phase 4 review R10).
+
+    The app half of the window check draws each state by loading the real
+    page and sending it the shell's pictures. It used to take its count of
+    page errors after the pictures were drawn, so an error thrown while
+    drawing was already in the count it compared against, and the state
+    passed. The count is taken before the page loads.
+    """
+    flow = read(APP_FLOW)
+    one = flow.split("for (const screen of input.screens) {", 1)[1]
+    counted = one.index("const before = errors.length;")
+    assert counted < one.index("await page.goto("), "the count is taken after the load"
+    assert counted < one.index("window.__shell(view)"), "the count is taken after drawing"
+    assert "errors.length > before" in one

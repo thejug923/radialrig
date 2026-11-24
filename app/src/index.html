@@ -7,84 +7,83 @@
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <main>
-    <!-- The name and the endorsement stand together, the shape the
-         engine's own masthead uses. -->
-    <header class="masthead">
-      <div class="mark">
-        <img class="dark" src="marks/radialrig-symbol-dark.svg" alt="">
-        <img class="light" src="marks/radialrig-symbol-light.svg" alt="">
+  <!-- The masthead the engine's own pages draw: the mark, then the name
+       and the endorsement reading on from it as one phrase (PLAN-0027
+       phase 4). Both arrive from strings.json. -->
+  <header class="masthead">
+    <span class="mark">
+      <img class="dark" src="marks/radialrig-symbol-dark.svg" alt="">
+      <img class="light" src="marks/radialrig-symbol-light.svg" alt="">
+    </span>
+    <span class="name" data-key="window_title"></span><span class="endorse" data-key="endorsement"></span>
+  </header>
+
+  <!-- One card in the middle of the window, and one state drawn into it
+       at a time: Ready, Working or Stopped. Every word on it arrives from
+       strings.json; the markup carries the slots and none of the words. -->
+  <main class="stage">
+
+    <!-- Standing notice, shown only when a debug build is pointed at an
+         overridden package source. A release binary carries no such
+         switch, so this stays empty and out of the way. -->
+    <p class="notice" id="notice" hidden></p>
+
+    <!-- Ready: what gets set up, where it lands, and that it comes back
+         out. No command, and no removal order: what a reader types to
+         take this back out is said on Remove RadialRig, not on the screen
+         that asks for the press. -->
+    <section class="card" id="state-gate" hidden>
+      <h1 id="gate-head" data-key="gate_head"></h1>
+      <p id="gate-lede" data-key="gate_lede"></p>
+      <!-- Two labeled landing places, named as paths a reader can open,
+           never as a command a reader could run. -->
+      <dl class="lands">
+        <div class="lands-row" data-block="gate_programs"><dt data-slot="label"></dt><dd><code data-slot="path"></code></dd></div>
+        <div class="lands-row" data-block="gate_support"><dt data-slot="label"></dt><dd><code data-slot="path"></code></dd></div>
+      </dl>
+      <p id="gate-reassure" data-key="gate_reassure"></p>
+      <!-- What the PATH read found, on the platform where that step is a
+           report rather than a write. The shell sends the key and the
+           folder; Details shows only on the platform that sends one. -->
+      <details class="details" id="gate-details" hidden>
+        <summary data-key="details_label"></summary>
+        <div class="drawer"><p id="path-report"></p></div>
+      </details>
+      <div class="action-zone">
+        <button type="button" id="consent" data-key="consent_label"></button>
+        <p class="press-note" id="gate-press-note" data-key="gate_press_note"></p>
       </div>
-      <h1>RadialRig Installer</h1>
-      <p class="endorsement" id="endorsement" data-key="endorsement"></p>
-    </header>
+    </section>
 
-    <!-- One stage, and one state drawn into it at a time. -->
-    <div class="stage">
-
-      <!-- Standing notice, shown only when a debug build is pointed at an
-           overridden package source. A release binary carries no such
-           switch, so this stays empty and out of the way. -->
-      <p class="notice" id="notice" hidden></p>
-
-      <!-- The consent gate: what gets set up, where it lands, and the
-           promise that it comes back out. Every sentence here arrives
-           from strings.json; the markup carries the slots and none of the
-           words. No command, and no removal order: what a reader types to
-           take this back out belongs to the owner manual, not to the
-           screen that asks for the press. -->
-      <div class="center" id="state-gate" hidden>
-        <section class="gate">
-          <div class="gate-main">
-            <h2 id="gate-head" data-key="gate_head"></h2>
-            <p class="friendly" id="gate-lede" data-key="gate_lede"></p>
-            <!-- Two labelled landing places, named as paths a reader can
-                 open, never as a command a reader could run. -->
-            <div class="lands">
-              <div class="lands-row" data-block="gate_programs">
-                <span class="lands-label" data-slot="label"></span>
-                <code data-slot="path"></code>
-              </div>
-              <div class="lands-row" data-block="gate_support">
-                <span class="lands-label" data-slot="label"></span>
-                <code data-slot="path"></code>
-              </div>
-            </div>
-            <!-- What the PATH read found, on the platform where that
-                 step is a report rather than a write. The shell sends
-                 the key and the folder; nothing shows on the platform
-                 that writes. -->
-            <p class="reassure" id="path-report" hidden></p>
-            <p class="reassure" id="gate-reassure" data-key="gate_reassure"></p>
-          </div>
-          <div class="gate-foot">
-            <p id="gate-press-note" data-key="gate_press_note"></p>
-            <button type="button" id="consent" data-key="consent_label"></button>
-          </div>
-        </section>
-      </div>
-
-      <!-- Running and stopped are one panel, because they say the same
-           four things: which step of how many, how far the run got, what
-           is happening, and what more there is to know. The retry control
-           is the one part only a stop that a second press can move
-           carries. -->
-      <div class="center" id="state-status" hidden>
-        <div class="status">
-          <p class="step-label" id="step-label" hidden></p>
-          <div class="steps-track" id="steps-track" aria-hidden="true" hidden>
-            <span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span>
-          </div>
-          <p class="saying" id="saying"></p>
-          <p class="detail" id="detail" hidden></p>
-          <p class="detail" id="held" hidden></p>
-          <div class="actions" id="actions" hidden>
-            <button type="button" id="retry" data-key="retry_label"></button>
-          </div>
+    <!-- Working and Stopped are one card. Working says what is going on
+         and draws the four steps; Stopped says what happened and what to
+         do next, with the step and the machine's own words behind
+         Details. The press forward shows only on a stop a second press
+         can move. -->
+    <section class="card" id="state-status" hidden>
+      <p class="stopped-row" id="stopped-row" hidden><span class="symbol stopped" aria-hidden="true">×</span><span data-key="stopped_status"></span></p>
+      <h1 id="heading"></h1>
+      <p id="saying"></p>
+      <ol class="progress" id="progress" data-label="steps_label" hidden>
+        <li data-key="step_download"></li>
+        <li data-key="step_check"></li>
+        <li data-key="step_install"></li>
+        <li data-key="step_start"></li>
+      </ol>
+      <details class="details" id="status-details" hidden>
+        <summary data-key="details_label"></summary>
+        <div class="drawer">
+          <p id="step-label" hidden></p>
+          <p class="said" id="doing" hidden></p>
+          <p class="said" id="held" hidden></p>
+          <p class="said" id="detail" hidden></p>
         </div>
+      </details>
+      <div class="action-zone" id="actions" hidden>
+        <button type="button" id="retry" data-key="retry_label"></button>
       </div>
+    </section>
 
-    </div>
   </main>
 
   <!-- The filler, in its own file. The document keeps markup and the

@@ -20,14 +20,20 @@ What the server is, exactly:
   the server can stop the moment the walkthrough ends.
 
 PLAN-0006 Phase 3 adds the second kit to the same page and to the same
-one press: a checkbox per packaged skill, unchecked to begin with, and a
-second dispositions table saying what those boxes would write. Since
-PLAN-0015 phase 3 the boxes stand in one group per agent, headed by the
-agent's label, so a person installs a skill for one agent, the other, or
-both. The page gains no behavior the command line lacks — it sequences
-`mnt.mount` and then the skill kit's add per ticked pair, which is
-`radialrig mount` followed by `radialrig skill add <name> --harness
-<agent>`, and the finished page prints one such line per pair.
+one press: a checkbox per packaged skill, unchecked to begin with. Since
+PLAN-0015 phase 3 there is a box per skill and agent, so a person
+installs a skill for one agent, the other, or both. The page gains no
+behavior the command line lacks — it sequences `mnt.mount` and then the
+skill kit's add per ticked pair, which is `radialrig mount` followed by
+`radialrig skill add <name> --harness <agent>`.
+
+PLAN-0027 phase 2 draws all of it as one screen, Add a project, which
+the app's page serves too: the folder in the heading, two sentences, the
+skill grid with a tick box per cell, the Connect box, the one press, and
+Details, which holds the two names, the files the press writes and every
+command it runs, in order. This module also holds the look every
+redesigned screen shares, which the manage page draws its own screens
+with.
 
 The process exit code is the outcome the page reached, over both kits:
 0 done, 3 a refusal that wrote nothing, 4 nothing to do, 5 something was
@@ -38,6 +44,7 @@ from __future__ import annotations
 
 import base64
 import html
+import re
 import secrets
 import sys
 import threading
@@ -113,103 +120,337 @@ LAUNCH_SPENT = "spent"
 LAUNCH_INVALID = "invalid"
 
 # --- page copy --------------------------------------------------------
-# These sentences are the accepted screen text; a change to them is a
-# change to the page's wording. They are here, once, rather than inside
-# the builders below. Where a screen was drawn and accepted, its words
-# are carried across as they stand; a state that was not drawn keeps the
-# sentences it had and takes only what the shared elements changed.
+# Every sentence this page says is a line of
+# `reports/ui-redesign-2026-11/wording.md`, where a change to a word is
+# made first (PLAN-0027). They are here, once, rather than inside the
+# builders below. Not one of them names a client, an agent or a skill: a
+# client's label arrives from the client table, an agent's from the
+# harness map and a skill's name from the catalog, so every line with one
+# in it is a template with a slot.
 
-TITLE = "RadialRig Project Setup"
-ENDORSEMENT = "A Radial 47 product"
+# The masthead's brand, wording.md's shared chrome, the same on every
+# page this package serves (PLAN-0027 phase 2; it was "RadialRig Project
+# Setup" on this page alone). The endorsement reads on from the name,
+# inline, so the masthead says "RadialRig, a Radial 47 product"
+# (PLAN-0027 phase 4).
+TITLE = "RadialRig"
+ENDORSEMENT = ", a Radial 47 product"
 
-REVIEW_HEAD = "Mount Plan"
-REVIEW_LEDE = (
-    "RadialRig adds its document folders and templates to this project and "
-    "changes nothing else. It can take all of them back out later."
+# The glyphs the look uses, written as escapes so no editor or checkout
+# can swap one for a look-alike.
+GLYPH_CHECK = "✓"    # check mark
+GLYPH_MINUS = "−"    # minus sign
+GLYPH_UP = "↑"       # upwards arrow
+GLYPH_STOP = "×"     # multiplication sign
+GLYPH_BACK = "←"     # leftwards arrow
+MIDDOT = "·"         # middle dot
+
+# The words every redesigned screen shares (wording.md section 2).
+DETAILS_LABEL = "Details"
+COPY_LABEL = "Copy"
+SHOW_COMMANDS = "Show commands"
+# A Copy button's accessible name, naming the command it copies: the
+# visible text stays the one word, and page.js swaps only that.
+COPY_NAME = "Copy: {command}"
+BACK_LABEL = "Projects"
+CANCEL_LABEL = "Cancel"
+
+# A status's kind, and its mark: a glyph, and the outline the stylesheet
+# draws round it. Shape tells them apart; no status has a color of its
+# own. The manage page's four project statuses and its gone folder; this
+# page uses the same marks for a result line's tone and a stopped setup.
+NEEDS_REPAIR = "needs-repair"
+UPDATE_READY = "update-ready"
+NOT_SET_UP = "not-set-up"
+WORKING = "working"
+GONE = "gone"
+MARKS = {
+    NEEDS_REPAIR: ("!", "repair"),
+    UPDATE_READY: (GLYPH_UP, "update"),
+    NOT_SET_UP: (GLYPH_MINUS, "new"),
+    WORKING: (GLYPH_CHECK, "ok"),
+    GONE: (GLYPH_STOP, "stopped"),
+}
+
+# The result line's three tones, and the mark each takes.
+RESULT_DONE = "done"
+RESULT_PARTLY = "partly"
+RESULT_FAILED = "failed"
+RESULT_MARKS = {
+    RESULT_DONE: WORKING,
+    RESULT_PARTLY: NEEDS_REPAIR,
+    RESULT_FAILED: GONE,
+}
+
+# A changed path's tag in a result line's Details, by what the engine did
+# to it. A row that changed nothing (already as wanted, already gone) is
+# not listed.
+TAG_ADDED = "added"
+TAG_REMOVED = "removed"
+TAG_UPDATED = "updated"
+TAG_KEPT = "kept"
+TAGS = {
+    mnt.CREATED: TAG_ADDED,
+    mnt.APPENDED: TAG_UPDATED,
+    mnt.MERGED: TAG_UPDATED,
+    mnt.UPDATED: TAG_UPDATED,
+    mnt.RESTORED: TAG_UPDATED,
+    mnt.EXCISED: TAG_UPDATED,
+    mnt.REMOVED: TAG_REMOVED,
+    mnt.LEFT: TAG_KEPT,
+}
+
+# The skill grid (wording.md, Screen 3 "Skills"), which the project
+# screen and Add a project both draw.
+SKILLS_HEAD = "Skills"
+ADD_ALL_LABEL = "Add all"
+ADD_ALL_NAME = "Add all skills for {agent}"
+CELL_ON_LABEL = "On"
+CELL_OFF_LABEL = "Off"
+CELL_UPDATE_LABEL = "Update"
+CELL_NAME = "{skill} for {agent}"
+CELL_UPDATE_NAME = "Update {skill} for {agent}"
+# A cell the engine won't touch: its reason, and no control.
+CELL_FOREIGN = "foreign"
+CELL_FILE = "file"
+CELL_REASONS = {
+    CELL_FOREIGN: "Has a folder RadialRig didn't add",
+    CELL_FILE: "A file is in the way",
+}
+
+# --- Add a project (wording.md, Screen 4) ------------------------------
+
+# Ready to set up.
+SETUP_HEAD = "Set up RadialRig in {project}"
+INTRO_ADDS = (
+    "RadialRig adds a docs folder with templates, the instructions your "
+    "agents read, and its rule lookup and rule editor for {agents}."
 )
-# The one aside under the connect offer. The wireframe puts it where the
-# read server's own note used to stand, and says the same thing about the
-# same thing in fewer words: what a registration lets a client do. Both
-# servers are registered (PLAN-0012); the note says where a write stops.
-READ_SERVER_NOTE = (
-    "The connection reads the records and can save a ruling. A saved ruling "
-    "stops in your working copy; you approve it in one sentence, and nothing "
-    "is committed until you say so."
-)
-# The mount table's caption carries no count: the rows are families of
-# paths rather than paths, so a number beside them would count the wrong
-# thing. The line under the table says what the chips mean instead.
-PLAN_CAPTION = "What a mount would write here:"
-PLAN_HINT = (
-    "An outlined chip marks a file this project already has; the mount "
-    "changes it only in the way its row says."
-)
-WROTE_CAPTION = "What the mount wrote"
-CONFLICT_CAPTION = "The paths that stopped the mount"
-MOUNT_LABEL = "Mount Project"
-REFRESH_LABEL = "Refresh Plan"
+INTRO_KEEPS = "Your own files stay in place, and you can remove RadialRig later."
+SETUP_LABEL = "Set up project"
 CHECK_AGAIN_LABEL = "Check again"
-SCOPE_HINT = (
-    "The name RadialRig uses for this project; it starts as the folder's name."
+
+# The Connect box. Unticked to begin with (owner, 2026-11-20, issue #62):
+# the entries reach every session the client opens, and the sentence
+# under the box says so before it is ticked. The sessions it lists are
+# the one client's this build knows; a second client moves the list to
+# its row of the client table.
+CONNECT_BOX = "Connect {label}"
+CONNECT_HINT = (
+    "Adds a rule lookup and a rule editor to every {label} session: chat, "
+    "the Code tab, and local Cowork."
 )
-OWNER_HINT = "The name the project's documents list as their owner."
-REVERSIBLE = (
-    "RadialRig can remove all of this precisely: <b>radialrig unmount</b> "
-    "reverses the mount and leaves anything you have edited."
+# Where the box can't be offered, one sentence in its place says why.
+CONNECT_NAME_TAKEN = (
+    "{label} already has an entry under this project's name. To connect, "
+    "change Project name in Details, then press Refresh."
 )
+# The same, on a folder that is set up already, whose screen has no
+# Project name and no Refresh (PLAN-0027 phase 2 review F3).
+CONNECT_NAME_TAKEN_SET_UP = (
+    "{label} already has an entry under this project's name, so RadialRig "
+    "can't connect it from here. Check Details to see what's in the way."
+)
+CONNECT_BLOCKED = (
+    "RadialRig can't connect {label} from here right now. Check Details to "
+    "see what's in the way."
+)
+CONNECT_NO_PROGRAM = (
+    "RadialRig can't connect {label} because it can't find its own rule "
+    "lookup program."
+)
+CONNECT_BLOCKERS_HEAD = "What's in the way of connecting {label}"
+
+# Details on the ready screen: the two names, the files, the commands.
+SCOPE_LABEL = "Project name"
+OWNER_LABEL = "Owner"
+REFRESH_LABEL = "Refresh"
+REFRESH_HINT = (
+    "After changing a name, press Refresh so the commands and the "
+    "connection use it."
+)
+FILES_HEAD = "Project files"
+FILE_ADDS_TO = "adds to your file"
+FILE_ALREADY = "already there"
+CLIENT_FILES_HEAD = "{label}'s settings"
+CLIENT_KEYS = "Adds two entries, {key} and {write_key}, and changes nothing else there."
+COMMANDS_HEAD = "Commands"
+
+# A setup that can't start, or stopped: the status over the card.
+STOPPED_STATE = "Setup stopped"
+BLOCKED_ONE = (
+    "1 file in this folder is in the way. Move or clear it, then check "
+    "again. Nothing was written."
+)
+BLOCKED_MANY = (
+    "{count} files in this folder are in the way. Move or clear them, then "
+    "check again. Nothing was written."
+)
+BLOCKED_SETTINGS = (
+    "RadialRig can't add its entries to {file}, because it isn't valid JSON "
+    "or isn't laid out as settings. Fix it, then check again. Nothing was "
+    "written."
+)
+BLOCKERS_HEAD = "What's in the way"
+# Details' reason for `.mcp.json`, the page's own (PLAN-0027 phase 2
+# review F6). The setup stops on that file when it isn't JSON, when it
+# isn't an object, when its servers aren't one, or when it is one file
+# on disk with another the setup writes; this says all of it, where the
+# command line's reason names the first. That reason stays its own.
+MCP_REASON = (
+    "this file isn't valid JSON, isn't laid out as settings, or is the same "
+    "file on disk as another one setup writes")
+INSIDE_SAID = "This folder is already part of {parent}. Nothing was written."
+INSIDE_WHY = (
+    "RadialRig keeps one set of rules for a project. Keep this folder's "
+    "records in a subfolder of that project's docs folders, such as "
+    "docs/decisions/{folder}/."
+)
+INSIDE_WHERE = "That project is at {path}"
+OPEN_PROJECT = "Open {parent}"
+SKILL_BLOCKED = (
+    "Something in this folder is where a skill you ticked would go. Move or "
+    "rename it, then check again. Nothing was written."
+)
+CONNECT_REFUSED = (
+    "{label}'s settings are in the way of the connection. Check Details to "
+    "see what, then check again. Nothing was written."
+)
+SETUP_FAILED = (
+    "Setup stopped, and nothing was changed. Check Details for what stopped "
+    "it."
+)
+SETUP_PARTIAL = (
+    "Setup stopped partway, and RadialRig couldn't put everything back. Some "
+    "files in this folder may be left changed. Check Details for the list."
+)
+
+# A folder that is already set up, opened from `radialrig setup`: it is
+# offered what it doesn't have yet.
+ALREADY_OFFERS = (
+    "RadialRig is already set up in this folder. Add what it doesn't have "
+    "yet."
+)
+ALREADY_COMPLETE = (
+    "RadialRig is already set up in this folder, and there's nothing left to "
+    "add from here."
+)
+ADD_LABEL = "Add to this project"
+# The one press of a set-up project that has every skill: its name is the
+# box's own, `CONNECT_BOX`.
+NOT_CONNECTED = "Not connected"
+
+# The result lines. `{skills}` is `SKILLS_ONE` or `SKILLS_MANY`, counting
+# each skill once whichever agents it was added for, the way a row of
+# Projects counts them.
+SKILLS_ONE = "1 skill"
+SKILLS_MANY = "{count} skills"
+SET_UP = "Set up RadialRig in {project}."
+SET_UP_SKILLS = (
+    "Set up RadialRig in {project} and added {skills}. {pick_up}")
+SET_UP_CONNECTED = (
+    "Set up RadialRig in {project} and connected {label}. Fully quit and "
+    "reopen {label} to use the connection.")
+SET_UP_BOTH = (
+    "Set up RadialRig in {project}, added {skills}, and connected {label}. "
+    "{both}")
+PICK_UP_ONE = "Start a new agent session to pick it up."
+PICK_UP_MANY = "Start a new agent session to pick them up."
+BOTH_ONE = (
+    "Start a new agent session for the skill, and fully quit and reopen "
+    "{label} to use the connection.")
+BOTH_MANY = (
+    "Start a new agent session for the skills, and fully quit and reopen "
+    "{label} to use the connection.")
+# A setup whose first step ran and whose skills or connection did not
+# (PLAN-0027 phase 2 prescription 4): the line says what was set up and
+# what wasn't. A line saying nothing of a step was changed stands only
+# where that step refused, or failed and put back everything it wrote.
+SET_UP_NO_SKILLS = (
+    "Set up RadialRig in {project}, but couldn't add the skills you ticked. "
+    "None of them was added. Check Details for what stopped them.")
+SET_UP_SKILLS_LEFT = (
+    "Set up RadialRig in {project}, but couldn't finish adding the skills "
+    "you ticked. Some of their files may be left. Check Details for the "
+    "list.")
+NOT_CONNECTED_EITHER = "{label} wasn't connected."
+SET_UP_NO_CONNECT = (
+    "Set up RadialRig in {project}, but couldn't connect {label}. Its "
+    "settings weren't changed. Check Details for what stopped it.")
+SET_UP_CONNECT_LEFT = (
+    "Set up RadialRig in {project}, but couldn't finish connecting {label}. "
+    "Some of its settings may be left changed. Check Details for the list.")
+SET_UP_SKILLS_NO_CONNECT = (
+    "Set up RadialRig in {project} and added {skills}, but couldn't connect "
+    "{label}. Its settings weren't changed. {pick_up}")
+SET_UP_SKILLS_CONNECT_LEFT = (
+    "Set up RadialRig in {project} and added {skills}, but couldn't finish "
+    "connecting {label}. Some of its settings may be left changed. Check "
+    "Details for the list.")
+# The same, for a project that was already set up.
+ADDED = "Added {skills}. {pick_up}"
+ADDED_CONNECTED = "Added {skills} and connected {label}. {both}"
+ADDED_NO_CONNECT = (
+    "Added {skills}, but couldn't connect {label}. Its settings weren't "
+    "changed. {pick_up}")
+ADDED_CONNECT_LEFT = (
+    "Added {skills}, but couldn't finish connecting {label}. Some of its "
+    "settings may be left changed. Check Details for the list.")
+NOTHING_ADDED = "Those skills were already there. Nothing was changed."
+SKILLS_FAILED = "Couldn't add the skills. Nothing was changed."
+SKILLS_STOPPED = (
+    "Couldn't finish adding the skills. Some of their files may be left "
+    "changed. Check Details for the list.")
+# A ticked skill whose copy was edited after the screen was drawn: the
+# engine leaves it alone, and the line says so after whatever it added.
+KEPT_EDITED = "Left a skill copy you edited as it was."
+# The connection alone (wording.md, Screen 3's lines for the same press).
+CONNECTED_SAID = (
+    "Connected {label}. Fully quit and reopen {label} to use the connection.")
+CONNECT_FAILED_SAID = "Couldn't connect {label}. Nothing was changed."
+CONNECT_STOPPED_SAID = (
+    "Couldn't finish connecting {label}. Some of its settings may be left "
+    "changed. Check Details for the list.")
+# After a press that connected while the client was open (BUG-0018). This
+# page has no Repair, so the line names where one is.
+RUNNING_AFTER_SETUP = (
+    "{label} is running and may undo this change. Fully quit it and reopen "
+    "it; if the connection is gone, open this project in RadialRig and press "
+    "Repair.")
+
+# What a finished page says about its server. `radialrig setup` stops its
+# server once a press finishes it; the app's page goes on standing and
+# says none of these.
 STOPPED = (
     "Setup is finished and the local server has stopped. You can close this page."
 )
-FAILED_HEAD = "RadialRig stopped before writing anything."
-# A press that stopped after something landed says so. The writers put
-# back what they can on a file error and raise their kit's own error,
-# whose sentence names what could not be put back; the page's outcome
-# follows that sentence (PLAN-0016 phase 4, made exact by PLAN-0017
-# phase 2).
+CLOSED = "The local server has stopped. You can close this page."
+CLOSED_RETRY = (
+    "The local server has stopped. You can close this page. To try again, "
+    "start setup again."
+)
+# A stop the engine's own words say more about than the screen does.
+# The writers put back what they can on a file error and raise their
+# kit's own error, whose sentence names what could not be put back; the
+# page's outcome follows that sentence (PLAN-0016 phase 4, made exact by
+# PLAN-0017 phase 2). The manage page's own stop bodies still say this.
 PARTIAL_HEAD = "RadialRig stopped part way, and some of what it wrote may be left."
-# After a skill fault on the mount press the ticked registration is not
-# attempted, and the page says so beside the fault.
+# After a skill fault on the mount press the ticked connection is not
+# attempted. This sentence rides in the state's message for the activity
+# log; the screen says the same in its own result line.
 CONNECT_NOT_ATTEMPTED = "The registration was not attempted after that step."
+# How the engine ends a file error's sentence when nothing is left
+# changed (`mnt.stopped_sentence`), and how Details ends it instead
+# (PLAN-0027 phase 2 review F7).
+ENGINE_NO_WRITE = "; nothing was written"
+PAGE_NO_CHANGE = "; nothing was changed"
 
-# The skills kit's section labels (D-36, PLAN-0006 Phase 3). Labels only:
-# every outcome sentence still comes out of `report.py`, and not one of
-# these names a skill or an agent — the names come out of the catalog,
-# the agents' labels out of the harness map, and the one sentence with
-# an agent in it is a template with a slot (PLAN-0015 constraint 3).
-SKILLS_HEAD = "Add agent skills"
-SKILLS_LEDE = (
-    "A skill is an instruction document an agent reads. Each one lands in "
-    "its own directory and comes out the same way."
-)
-SKILLS_DONE_HEAD = "The skills are installed."
-SKILLS_LABEL = "Add these skills"
-# No count, by the owner's ruling of 2026-08-21: the caption says what
-# the checked boxes write, and the table under it is the count.
-SKILLS_PLAN_CAPTION = "What the checked skills would write:"
-SKILLS_WROTE_CAPTION = "What the skills kit wrote"
-SKILLS_NONE = "This project already has every skill this package ships."
-# One group of boxes per agent (PLAN-0015 phase 3). The control beside a
-# group's heading ticks that group's boxes and nothing in another; a
-# group whose agent already has every skill says so in one sentence.
-# The control's spoken name carries the agent, since two controls that
-# both read "Tick all" are two the same to a reader by name; the label
-# is the map's, filled at render time.
-TICK_ALL_LABEL = "Tick all"
-TICK_ALL_NAME = "Tick all for {label}"
-SKILLS_AGENT_NONE = "{label} already has every skill this package ships."
-SKILLS_REVERSIBLE = (
-    "Each skill comes out on its own: <b>radialrig skill remove &lt;name&gt;</b> "
-    "leaves anything you have edited."
-)
-# The finished page's account of the skill press: one command line per
-# skill and agent it wrote for, so the run is reproducible from the
-# terminal (PLAN-0015 phase 3 prescription 2). The line is the command
-# line's own form, the one the manage page's command table spells.
-SKILLS_RAN_HEAD = "The same skills, from the command line"
-SKILLS_RAN_LEDE = (
-    "Running these lines yourself does the same thing the press just did."
-)
+# The command lines a press runs, as the command line spells them. The
+# skill line is the one the manage page's command table composes, and so
+# is the connect line.
 SKILL_ADD_LINE = "radialrig skill add {name} {root} --harness {harness}"
+CONNECT_LINE = "radialrig connect {client} {root}"
+MOUNT_LINE = "radialrig mount {root}"
 
 # A checkbox's posted value: the agent's map key and the skill's catalog
 # name, joined once. The page looks both halves up before anything
@@ -217,25 +458,6 @@ SKILL_ADD_LINE = "radialrig skill add {name} {root} --harness {harness}"
 # the form and never a path: a value the map or the catalog does not
 # know is dropped whole.
 BOX_SEP = "/"
-
-# The connect kit's section labels (PLAN-0007 Phase 2). Labels only, and
-# not one of them names a client or a client's settings file: the name,
-# the paths and the restart sentence arrive from the client table, the
-# same rule that keeps the SKILLS_* labels from naming a skill.
-CONNECT_HEAD = "Connect {client}"
-CONNECT_LEDE = (
-    "RadialRig adds one entry to {client}'s own settings and changes "
-    "nothing else there."
-)
-CONNECT_DONE_HEAD = "The project is registered."
-CONNECT_FAILED_HEAD = "The registration did not run."
-CONNECT_LABEL = "Register this project"
-CONNECT_PLAN_CAPTION = "What the registration would write:"
-CONNECT_WROTE_CAPTION = "What the registration wrote"
-CONNECT_REVERSIBLE = (
-    "The entry comes out precisely: <b>radialrig unconnect</b> removes it and "
-    "lists anything it leaves."
-)
 
 # --- refusals ---------------------------------------------------------
 # Every refusal below is served by one code path, and a second surface
@@ -317,6 +539,18 @@ SKILLED = "skilled"
 CONNECTED = "connected"
 CONNECT_FAILED = "connect-failed"
 
+# Which refusal a CONFLICT state is. Each has its own sentence and its
+# own next step on the screen, so the state says which it is rather than
+# leaving the screen to read it back out of the report's lines.
+WHY_FILES = "files"        # files in the way of the setup
+WHY_INSIDE = "inside"      # the folder is inside a set-up project
+WHY_SKILL = "skill"        # a ticked skill's place is taken
+WHY_CONNECT = "connect"    # the client's settings block a ticked connection
+
+# The steps of a press that did not land, after an earlier one did.
+MISSED_SKILLS = "skills"
+MISSED_CONNECT = "connect"
+
 
 @dataclass(frozen=True)
 class PageState:
@@ -343,9 +577,25 @@ class PageState:
     # The connect kit's half: what the offer would write or wrote, and
     # the detected client it would write to. `client` is None whenever
     # there is nothing to offer, which is what keeps the client's name
-    # off a page that has no client behind it.
+    # off a page that has no client behind it. After a press it is the
+    # client the press connected, or one whose settings a connection that
+    # stopped partway left changed, with no rows (PLAN-0027 phase 2
+    # review F2).
     connect: tuple = ()
     client: object | None = None
+    # What the screen needs to say a refusal or a partial result in its
+    # own words (PLAN-0027 phase 2). None of it changes what a press
+    # does: `why` is which refusal a CONFLICT state is, `parent` the
+    # set-up project a refused folder is inside, `withheld` the rows of a
+    # connection the plan refused while the setup itself stands, `missed`
+    # the steps of a press that did not land after an earlier one did,
+    # and `left` whether the step that stopped could not put back
+    # everything it wrote.
+    why: str = ""
+    parent: object | None = None
+    withheld: tuple = ()
+    missed: tuple = ()
+    left: bool = False
 
 
 class Session:
@@ -370,12 +620,11 @@ class Session:
         # never become a path fragment.
         self.skills: tuple = ()
         # The connect box, already filtered against the client table.
-        # Ticked to begin with, unlike the skills boxes: the Objective
-        # promises one press, and a mount that leaves this client with no
-        # connection is the gap PLAN-0007 exists to close. The offer is
-        # only ever shown when a client is detected and this project is
-        # not registered yet, so a ticked box writes nothing surprising.
-        self.connect: bool = True
+        # Unticked to begin with, like the skills boxes (owner, 2026-11-20,
+        # issue #62): the client's entries reach every session it opens,
+        # not just this project's, so the reader opts in after reading the
+        # sentence that says so.
+        self.connect: bool = False
         self.launch_token = secrets.token_urlsafe(TOKEN_BYTES)
         self.token = secrets.token_urlsafe(TOKEN_BYTES)
         self.port = 0
@@ -624,16 +873,23 @@ def _connect_client(session: Session):
     return client
 
 
-def _connect_plan(session: Session, client) -> tuple:
+def _connect_plan(session: Session, client, *, drawn: bool = False) -> tuple:
     """What the offer would write. Writes nothing.
 
     The same `connect_plan` the command line's --dry-run calls, given the
     scope the page is about to mount with: at review time there is no
     mount record to read one from.
+
+    A press plans the connection only where its box is ticked. With
+    `drawn`, the screen plans it as it is drawn, ticked or not, so a
+    refusal stands in the box's place before any press rather than after
+    one (PLAN-0027 phase 2 review F1); the rows come back only where the
+    box is ticked, as they always have.
     """
-    if client is None or not session.connect:
+    if client is None or not (session.connect or drawn):
         return ()
-    return cn.connect_plan(session.root, client.name, scope=session.scope).dispositions
+    rows = cn.connect_plan(session.root, client.name, scope=session.scope).dispositions
+    return rows if session.connect else ()
 
 
 def stopped_outcome(exc: BaseException) -> int:
@@ -659,6 +915,11 @@ def _connect_checked(
     leaves the outcome alone; one that stopped on a file error carries
     the outcome its sentence earns: partial when a copy is left changed,
     an error when every copy was put back.
+
+    A stop that left one of the client's own settings files changed
+    still names the client, with no rows, so the after-press sentence
+    can ask whether it is open (PLAN-0027 phase 2 review F2). No line
+    claims the connection from that: the rows are what a claim reads.
     """
     if client is None or not session.connect:
         return (), None, "", report.OK
@@ -671,7 +932,7 @@ def _connect_checked(
         # The writer put back what it could and its sentence says what
         # it could not. The page prints that sentence; it does not reach
         # the generic boundary, which cannot.
-        return (), None, str(exc), stopped_outcome(exc)
+        return (), _settings_left(client, exc), str(exc), stopped_outcome(exc)
     except cn.ConnectError as exc:
         # The offer was planned before the mount ran. Anything that
         # refuses it now arrived between the two, and a mount that landed
@@ -681,6 +942,18 @@ def _connect_checked(
         session.record(report.OK, consequential=True)
     ro.record_seen(session.root)
     return result.dispositions, client, "", report.OK
+
+
+def _settings_left(client, exc):
+    """The client, where a connection that stopped left one of its
+    settings files changed: a path its writer could not put back is one
+    of the files `connect` wrote to. Else None, as for a stop that left
+    only the project's own record."""
+    try:
+        files = {Path(target.path) for target in cn.detect(client)}
+    except (cn.ConnectError, OSError):
+        return None
+    return client if any(Path(path) in files for path in exc.left) else None
 
 
 def _connect_conflict_state(session: Session, exc) -> PageState:
@@ -694,6 +967,7 @@ def _connect_conflict_state(session: Session, exc) -> PageState:
             exc.client, session.root, exc.conflicts)),
         message=report.connect_refusal_remedy(
             exc.client.name, session.root, exc.conflicts),
+        why=WHY_CONNECT,
     )
 
 
@@ -706,6 +980,7 @@ def _skill_conflict_state(exc) -> PageState:
         dispositions=exc.conflicts,
         lines=tuple(report.skill_conflict_report(exc.conflicts)),
         message=report.SKILL_FOREIGN_TAIL,
+        why=WHY_SKILL,
     )
 
 
@@ -714,6 +989,7 @@ def _mount_conflict_state(exc) -> PageState:
         CONFLICT, report.REFUSED, False,
         dispositions=report.conflict_dispositions(exc.conflicts),
         lines=tuple(report.conflict_report(exc.conflicts)),
+        why=WHY_FILES,
     )
 
 
@@ -725,6 +1001,7 @@ def _inside_mounted_state(exc) -> PageState:
         CONFLICT, report.REFUSED, False,
         lines=tuple(report.inside_mounted_report(exc.root, exc.parent)),
         message=report.inside_mounted_remedy(exc.root, exc.parent),
+        why=WHY_INSIDE, parent=exc.parent,
     )
 
 
@@ -740,37 +1017,48 @@ def compute_state(session: Session) -> PageState:
         return PageState(FAILED, report.ERROR, True, message=str(exc))
     client = _connect_client(session)
     notice = ""
+    withheld: tuple = ()
     try:
-        connect = _connect_plan(session, client)
+        connect = _connect_plan(session, client, drawn=True)
     except (mnt.WriteStopped, cn.WriteStopped) as exc:
         # A file error while the offer is still planned: nothing was
         # written, and the page says so rather than dropping the offer
-        # without a word.
-        return PageState(FAILED, report.ERROR, True, message=str(exc))
+        # without a word. An unticked box leaves the offer as it stood:
+        # the press plans it again once it is ticked, and stops there.
+        if session.connect:
+            return PageState(FAILED, report.ERROR, True, message=str(exc))
+        connect = ()
     except cn.ConnectRefused as exc:
         # A refused registration withdraws the offer; it never takes the
         # mount button with it. The connect is an offer, never a
         # precondition, so the page says why it is not on the table and
         # leaves the press that brought the reader here alone.
         client, connect = None, ()
+        withheld = tuple(exc.conflicts)
         notice = report.connect_withheld_notice(
             exc.client.name, session.root, exc.conflicts)
     except cn.ConnectError:
-        client, connect = None, ()
+        # Any other failure to plan it takes a ticked box off the screen;
+        # an unticked one stands as it did before the screen planned it.
+        if session.connect:
+            client = None
+        connect = ()
     try:
         if mnt.is_mounted(root):
             manifest = mnt.read_manifest(root)
             # A mounted project used to be the end of the walkthrough.
-            # It still is, unless this package ships a skill this project
-            # does not already have, or a client on this machine is not
-            # registered with it: then there is one more thing the page
-            # can do, and stopping would hide it.
+            # It still is, unless the screen draws a tick box for a skill
+            # this project does not already have, or a client on this
+            # machine is not registered with it: then there is one more
+            # thing the page can do, and stopping would hide it. A skill
+            # whose place is taken draws no box, so it keeps nothing
+            # standing (PLAN-0027 phase 2 review F4).
             return PageState(
                 ALREADY, report.NOOP,
-                not any(not s.current for s in catalog) and client is None,
+                not _ticks(session, catalog) and client is None,
                 lines=tuple(report.already_mounted_report(root, manifest)),
                 skills=skills, catalog=catalog, connect=connect, client=client,
-                message=notice,
+                message=notice, withheld=withheld,
             )
         plan = mnt.mount_plan(root, scope=session.scope, owner=session.owner)
     except mnt.MountConflict as exc:
@@ -782,7 +1070,7 @@ def compute_state(session: Session) -> PageState:
     return PageState(
         REVIEW, report.NOOP, False, dispositions=plan.dispositions(), result=plan,
         skills=skills, catalog=catalog, connect=connect, client=client,
-        message=notice,
+        message=notice, withheld=withheld,
     )
 
 
@@ -842,15 +1130,19 @@ def perform_mount(session: Session) -> PageState:
         # registration is not attempted after a step that failed, and
         # when one was ticked the page says that too.
         message = str(exc)
+        missed = (MISSED_SKILLS,)
         if failed:
             message += " " + failed
+            missed += (MISSED_CONNECT,)
         elif client is not None and session.connect:
             message += " " + CONNECT_NOT_ATTEMPTED
+            missed += (MISSED_CONNECT,)
         return PageState(
             MOUNTED, report.PARTIAL, True,
             dispositions=result.dispositions(),
             lines=tuple(report.mount_report(result)),
             result=result, message=message,
+            missed=missed, left=stopped_outcome(exc) == report.PARTIAL,
         )
     connect, used, error, stopped = _connect_checked(session, client)
     return PageState(
@@ -861,6 +1153,8 @@ def perform_mount(session: Session) -> PageState:
         # The mount's own head reports the mount. A registration that did
         # not run says so here rather than being left unsaid.
         message=failed or error,
+        missed=(MISSED_CONNECT,) if (failed or error) else (),
+        left=stopped == report.PARTIAL,
     )
 
 
@@ -896,18 +1190,27 @@ def perform_skills(session: Session) -> PageState:
             skills, outcome, added = _add_checked(session, plans)
         except sk.SkillError as exc:
             # The kit's error carries the writer's sentence, and the
-            # outcome follows it.
-            return PageState(FAILED, stopped_outcome(exc), True, message=str(exc))
+            # outcome follows it. The connection, where one was ticked,
+            # is not attempted after it.
+            code = stopped_outcome(exc)
+            return PageState(
+                FAILED, code, True, message=str(exc),
+                missed=(MISSED_SKILLS,) + ((MISSED_CONNECT,) if offered else ()),
+                left=code == report.PARTIAL)
     connect, used, error, stopped = _connect_checked(session, client)
     failed = failed or error
+    missed = (MISSED_CONNECT,) if failed else ()
     if skills:
         return PageState(SKILLED, max(outcome, stopped), True, skills=skills,
-                         added=added, connect=connect, client=used, message=failed)
+                         added=added, connect=connect, client=used, message=failed,
+                         missed=missed, left=stopped == report.PARTIAL)
     if failed or not connect:
         # Nothing to claim: the registration was the whole press and it
         # did not run, or stopped part way through its write. The head
         # says which, and the engine's own sentence says why.
-        return PageState(CONNECT_FAILED, stopped or report.ERROR, True, message=failed)
+        return PageState(CONNECT_FAILED, stopped or report.ERROR, True, message=failed,
+                         client=used, missed=(MISSED_CONNECT,),
+                         left=stopped == report.PARTIAL)
     return PageState(CONNECTED, outcome, True, connect=connect, client=used)
 
 
@@ -998,92 +1301,20 @@ def _attr(value) -> str:
 def _chip(verb: str) -> str:
     """An outlined chip marks a row that touches a file already standing.
 
-    Outlined rather than filled: the accepted wireframe spends this
-    screen's one amber on the press that writes, and the distinction a
-    reader needs — a path this project already has, against a path it
-    does not — is carried by the outline and by `PLAN_HINT` under the
-    table.
+    Drawn by the manage page's plan and result tables, which stay until
+    PLAN-0027 phase 3 rebuilds them. Outlined rather than filled: the
+    screen's one amber is the press that writes.
     """
     touches = verb in (mnt.MERGED, mnt.APPENDED, mnt.CURRENT, mnt.LEFT)
     cls = "chip touches" if touches else "chip"
     return f'<span class="{cls}">{_esc(verb)}</span>'
 
 
-# --- the mount table's families ---------------------------------------
-# The accepted wireframe draws the mount plan as six rows, not eleven:
-# the three folders a mount creates are one line, the two seeded specs
-# are one line, the three templates are one line, and the three files it
-# touches keep a line each. What a family row says is the wireframe's own
-# sentence for that family, which is why the "What it does" column is
-# filled for every row here where the engine's own `MOUNT_CREATED` is
-# deliberately empty for a bare create.
-#
-# The families are a reading of the plan, never a picture pinned over it:
-# a family is drawn only when the plan carries its paths, it takes the
-# verb of the path it stands for, and any path no family names keeps its
-# own row and the engine's own sentence.
-
-@dataclass(frozen=True)
-class Family:
-    """One row of the wireframe's mount table."""
-
-    paths: tuple[str, ...]  # the plan paths this row stands for
-    label: str              # what the path cell reads
-    reason: str             # what the "What it does" cell reads
-
-
-MOUNT_FAMILIES: tuple[Family, ...] = (
-    Family(
-        (mnt.MCP_REL,), mnt.MCP_REL,
-        "one RadialRig entry added; nothing else in the file changes",
-    ),
-    Family(
-        (mnt.MANIFEST_REL,), mnt.MANIFEST_REL,
-        "the record RadialRig uses to take everything back out",
-    ),
-    Family(
-        (mnt.AGENTS_REL,), mnt.AGENTS_REL,
-        "one fenced section at the end; the rest of the file is unchanged",
-    ),
-    Family(
-        (mnt.CLAUDE_REL,), mnt.CLAUDE_REL,
-        "one fenced line importing AGENTS.md, so Claude Code reads the route map",
-    ),
-    Family(
-        (mnt.CODEX_REL,), mnt.CODEX_REL,
-        "the same two servers registered for Codex, in one fenced region at the end",
-    ),
-    Family(
-        ("docs/decisions/.gitkeep", "docs/plans/.gitkeep", "docs/archive/.gitkeep"),
-        "docs/decisions/, docs/plans/, docs/archive/",
-        "three document folders, kept in git even while empty",
-    ),
-    Family(
-        ("docs/archive/D-00-archive-exclusion-target.md",),
-        "docs/archive/D-00-archive-exclusion-target.md",
-        "one archived record, so the archive search filter has something to find",
-    ),
-    Family(
-        ("docs/spec.md", "docs/spec-git-environment.md"),
-        "docs/spec.md, docs/spec-git-environment.md",
-        "rules for this project's records, and default branch, pull-request "
-        "and CI rules that agents follow",
-    ),
-    Family(
-        ("docs/templates/decision.md", "docs/templates/plan.md",
-         "docs/templates/spec.md"),
-        "docs/templates/",
-        "three blank templates: decision, plan, spec",
-    ),
-)
-
-
 # The wrote-table's sentences for the codes the engine leaves empty.
 # On the command line "created <path>" is a whole line and needs no
-# tail; in a three-column table the empty cell reads as a hole. Same
-# rule as the families above: the page fills the cell, the engine's
-# own wording stays empty for the command line. The record rows say
-# what the record is for, in the mount table's own words.
+# tail; in a three-column table the empty cell reads as a hole. The page
+# fills the cell, and the engine's own wording stays empty for the
+# command line. The record rows say what the record is for.
 WROTE_REASONS: dict[str, str] = {
     mnt.SKILL_ADDED:
         "one new skill folder; every file in it is this package's",
@@ -1099,181 +1330,10 @@ def _worded(d, resolve) -> str:
     for a code the engine leaves wordless.
 
     `resolve` is the engine resolver the caller's rows belong to. The
-    setup page passes the mount kit's and the manage page the orphan
-    kit's, so each page keeps reading the tables it read before.
+    manage page passes the orphan kit's, which reads the mount kit's
+    beneath it.
     """
     return resolve(d) or WROTE_REASONS.get(d.code, "")
-
-
-def _resolved(dispositions) -> list[tuple[str, str, str]]:
-    """Every disposition as its three cells, in the engine's own words."""
-    out = []
-    for d in dispositions:
-        reason = report.conflict_reason(d.path) if d.code == "CONFLICT" \
-            else _worded(d, mnt.reason_text)
-        out.append((d.verb, d.path, reason))
-    return out
-
-
-def _families(dispositions) -> list[tuple[str, str, str]]:
-    """The plan's paths, gathered into the wireframe's family rows."""
-    held = {d.path: d for d in dispositions}
-    taken: set[str] = set()
-    out: list[tuple[str, str, str]] = []
-    for family in MOUNT_FAMILIES:
-        present = [held[path] for path in family.paths if path in held]
-        if not present:
-            continue
-        taken.update(d.path for d in present)
-        lead = present[0]
-        # The family's sentence describes a write. A row the engine marks
-        # current is a path it will not write (the project already holds
-        # what the seed would add), and the engine's own sentence says so.
-        reason = family.reason
-        if lead.verb == mnt.CURRENT:
-            reason = mnt.reason_text(lead) or family.reason
-        out.append((lead.verb, family.label, reason))
-    out.extend(cells for cells in _resolved(dispositions) if cells[1] not in taken)
-    return out
-
-
-def _rows(cells) -> str:
-    return "".join(
-        "<tr>"
-        f'<td class="verb">{_chip(verb)}</td>'
-        f'<td class="path">{_esc(path)}</td>'
-        f'<td class="why">{_esc(reason)}</td>'
-        "</tr>"
-        for verb, path, reason in cells
-    )
-
-
-def _table(cells, caption: str) -> str:
-    """One plan table. `caption` is markup: a caption that counts its
-    paths carries an entity, and the count is composed by the caller."""
-    if not cells:
-        return ""
-    return (
-        '<div class="plan-wrap"><table class="plan">'
-        f"<caption>{caption}</caption>"
-        '<thead><tr><th scope="col">Change</th><th scope="col">Path</th>'
-        '<th scope="col">What it does</th></tr></thead>'
-        f"<tbody>{_rows(cells)}</tbody></table></div>"
-    )
-
-
-def _plan_table(dispositions, caption: str, *, count: bool = True) -> str:
-    """One row per path, under a caption that counts them.
-
-    The count is dropped where the owner has ruled it out — the mount
-    table, the skills table and the connect plan — and kept everywhere else, so a table of
-    paths still says how many it holds.
-    """
-    if not dispositions:
-        return ""
-    head = _esc(caption)
-    if count:
-        # A row marked current was not written; the count says how many
-        # paths the press touched, and the row's own sentence says why
-        # that one was not among them.
-        touched = sum(1 for d in dispositions if d.verb != mnt.CURRENT)
-        head += f" &mdash; {touched} path(s)"
-    return _table(_resolved(dispositions), head)
-
-
-def _mount_table(dispositions) -> str:
-    """The mount plan, as the wireframe draws it: families, no count, and
-    the line under it saying what an outlined chip means."""
-    if not dispositions:
-        return ""
-    return (
-        _table(_families(dispositions), _esc(PLAN_CAPTION))
-        + f'<p class="table-hint">{_esc(PLAN_HINT)}</p>'
-    )
-
-
-def _skill_group(session: Session, harness: sk.Harness, states) -> str:
-    """One agent's group: its label as the heading, one checkbox per
-    skill that agent lacks, and beside the heading the control that
-    ticks them all (PLAN-0015 phase 3 prescription 1).
-
-    Unchecked by default: the mount is what the user came for, and a box
-    that arrives already ticked installs something nobody asked for. A
-    skill whose copy for this agent was changed, or one whose target
-    directory this project already owns, is shown disabled with the
-    engine's own reason beside it rather than hidden — the page says
-    what it will not do. The control is a plain button the page's script
-    wires up; it stands only where there is a box it could tick, and
-    with no script the boxes are ticked one by one and the form posts
-    the same. It stands after the legend, not inside it, so the group's
-    own name stays the agent's label and the control's name is its own.
-    An agent that already has every skill is told so in one sentence
-    and offered no boxes (prescription 3).
-    """
-    rows = []
-    open_ = 0
-    for state in states:
-        if state.current:
-            continue
-        entry = state.packaged
-        blocked = state.edited or state.foreign or state.dir_is_file
-        open_ += not blocked
-        ticked = (harness.name, state.name) in session.skills and not blocked
-        note = mnt.reason_text(state.list_disposition()) if blocked else entry.summary
-        rows.append(
-            '<label class="choice">'
-            '<input type="checkbox" name="skill" '
-            f'value="{_attr(box_value(harness.name, state.name))}"'
-            f'{" disabled" if blocked else ""}{" checked" if ticked else ""}>'
-            f'<span class="name">{_esc(state.name)}</span>'
-            f'<span class="what">{_esc(entry.version)} &middot; {_esc(note)}</span>'
-            "</label>"
-        )
-    if rows:
-        body = "".join(rows)
-    else:
-        body = f'<p class="hint">{_esc(SKILLS_AGENT_NONE.format(label=harness.label))}</p>'
-    tick = (
-        '<button class="tick" type="button" '
-        f'aria-label="{_attr(TICK_ALL_NAME.format(label=harness.label))}">'
-        f"{_esc(TICK_ALL_LABEL)}</button>"
-        if open_ else ""
-    )
-    return (
-        '<fieldset class="skills agent">'
-        f"<legend>{_esc(harness.label)}</legend>"
-        + tick
-        + body
-        + "</fieldset>"
-    )
-
-
-def _skills_fieldset(session: Session, catalog) -> str:
-    """The skills box: one group per agent, in map order, each headed by
-    the agent's label.
-
-    A page where every agent already has every skill keeps the one
-    sentence it has always said; otherwise every agent gets its group,
-    the complete ones saying so in their own sentence, so the two
-    headings stand whichever agent a person came for.
-    """
-    if not catalog:
-        return ""
-    if all(state.current for state in catalog):
-        body = f'<p class="hint">{_esc(SKILLS_NONE)}</p>'
-    else:
-        body = "".join(
-            _skill_group(session, harness, [
-                s for s in catalog if s.harness.name == harness.name])
-            for harness in sk.HARNESSES.values()
-        )
-    return (
-        '<fieldset class="skills">'
-        f"<legend>{_esc(SKILLS_HEAD)}</legend>"
-        f'<p class="hint">{_esc(SKILLS_LEDE)}</p>'
-        + body
-        + "</fieldset>"
-    )
 
 
 # The characters a slot renders bare with, beside letters and digits: a
@@ -1318,111 +1378,42 @@ def quoted(value: str) -> str:
 
 
 def skill_add_line(harness: str, name: str, root) -> str:
-    """The command line that adds one skill for one agent, as the
-    finished page prints it: the same line the manage page's command
-    table composes for the same press."""
+    """The command line that adds one skill for one agent: the same line
+    the manage page's command table composes for the same press."""
     return SKILL_ADD_LINE.format(
         name=quoted(name), root=quoted(str(root)), harness=quoted(harness))
 
 
-def _skill_lines(session: Session, state: PageState) -> str:
-    """The skill press, as the command line would run it: one line per
-    pair the press wrote for, so a finished page says what it did in a
-    form a reader can run again elsewhere (PLAN-0015 phase 3
-    prescription 2). Nothing where the press wrote for none — a ticked
-    box whose copy was edited is left alone, and its line would claim an
-    add that did not happen. Nothing either where the project's path is
-    one no quoting rule makes safe: the table above still says what the
-    press wrote, and no line is offered that would run something else
-    (PLAN-0017 phase 4, setup-web-04)."""
-    if not state.added:
-        return ""
+def connect_line(client_name: str, root) -> str:
+    """The command line that connects one client to one project."""
+    return CONNECT_LINE.format(client=quoted(client_name), root=quoted(str(root)))
+
+
+def mount_line(session: Session) -> str:
+    """`radialrig mount`, carrying whatever the page's own fields changed.
+
+    The two names are fields a reader can edit, so the command names them
+    whenever they are not the ones the bare command would have used. Every
+    slot goes through `quoted`: the project name starts as the folder's
+    own name, so a folder with a space in it would otherwise put one into
+    this line twice. A slot no quoting rule makes safe leaves no line at
+    all (setup-web-04).
+    """
     try:
-        items = "".join(
-            f"<li>{_command(skill_add_line(harness, name, session.root))}</li>"
-            for harness, name in state.added
-        )
+        line = MOUNT_LINE.format(root=quoted(str(session.root)))
+        if session.scope != mnt.default_scope(session.root):
+            line += f" --scope {quoted(session.scope)}"
+        if session.owner != mnt.DEFAULT_OWNER:
+            line += f" --owner {quoted(session.owner)}"
     except Unquotable:
         return ""
-    return (
-        '<fieldset class="skills">'
-        f"<legend>{_esc(SKILLS_RAN_HEAD)}</legend>"
-        f'<p class="hint">{_esc(SKILLS_RAN_LEDE)}</p>'
-        f'<ul class="steps">{items}</ul>'
-        "</fieldset>"
-    )
-
-
-def connect_head(client) -> str:
-    """The connect legend, with the detected client's name in it.
-
-    The constant stays a template so no page constant names a client;
-    the name arrives from the client table, the same road the restart
-    sentence takes."""
-    return CONNECT_HEAD.format(client=client.label)
-
-
-def connect_lede(client) -> str:
-    """The connect hint, with the detected client's name in it."""
-    return CONNECT_LEDE.format(client=client.label)
-
-
-def _connect_fieldset(session: Session, client) -> str:
-    """One checkbox for the one detected client, or nothing at all.
-
-    Ticked to begin with, because the offer only appears when a client is
-    on this machine and this project is not registered with it yet. The
-    sub-line names the settings files that would be edited and the key
-    that would be written, so the box says what pressing it does. The
-    posted value is filtered against the client table before anything
-    downstream reads it, so a posted string can never become a path.
-    """
-    if client is None:
-        return ""
-    where = ", ".join(target.path.as_posix() for target in cn.detect(client))
-    try:
-        key = cn.entry_key(client, session.scope)
-    except cn.ConnectError:
-        return ""
-    checked = " checked" if session.connect else ""
-    return (
-        '<fieldset class="skills">'
-        f"<legend>{_esc(connect_head(client))}</legend>"
-        f'<p class="hint">{_esc(connect_lede(client))}</p>'
-        '<label class="choice">'
-        f'<input type="checkbox" name="connect" value="{_attr(client.name)}"{checked}>'
-        f'<span class="name">{_esc(client.label)}</span>'
-        f'<span class="what">{_esc(key)} &middot; {_esc(where)}</span>'
-        "</label>"
-        "</fieldset>"
-    )
-
-
-def _notice(state: PageState) -> str:
-    """The page's one aside: an offer that is not on the table, and why.
-
-    The sentence comes out of `report`, so the page and the terminal give
-    the same account of the same refusal.
-    """
-    if not state.message:
-        return ""
-    return f'<p class="note">{_esc(state.message)}</p>'
-
-
-def _restart_line(state: PageState) -> str:
-    """The client's own restart sentence, from the client table."""
-    if state.client is None:
-        return ""
-    return f'<p class="closing">{_esc(state.client.restart)}</p>'
+    return line
 
 
 def _command(text: str, *, name: str = "") -> str:
-    """The command frame: the line, and the button that copies it.
-
-    `name` is the Copy button's accessible name, for a surface whose
-    buttons have to say which command each one copies (PLAN-0014 phase
-    2); left empty, the frame is the bytes this page has always served.
-    """
+    """The command frame the manage page's plan and result pages draw:
+    the line, and the button that copies it. `name` is the Copy button's
+    accessible name (PLAN-0014 phase 2)."""
     named = f' aria-label="{_attr(name)}"' if name else ""
     return (
         f'<div class="cmd"><code>{_esc(text)}</code>'
@@ -1442,234 +1433,1018 @@ def _form(session: Session, inner: str) -> str:
 def _choices() -> str:
     """The marker a form that draws the boxes carries (setup-web-03).
 
-    Only the review and already-mounted forms draw them, so only those
-    two carry this; the refusal's form posts without it, and `_apply`
-    then leaves the boxes as the reader left them.
+    Only the ready and already-set-up forms draw them, so only those two
+    carry this; a refusal's form posts without it, and `_apply` then
+    leaves the boxes as the reader left them.
     """
     return f'<input type="hidden" name="{CHOICES_FIELD}" value="1">'
 
 
-def _review_body(session: Session, state: PageState) -> str:
-    fields = (
-        '<div class="fields">'
-        '<div class="field"><label for="scope">Scope</label>'
-        f'<input id="scope" name="scope" value="{_attr(session.scope)}" '
-        'autocomplete="off" spellcheck="false">'
-        f'<p class="hint">{_esc(SCOPE_HINT)}</p></div>'
-        '<div class="field"><label for="owner">Owner</label>'
-        f'<input id="owner" name="owner" value="{_attr(session.owner)}" '
-        'autocomplete="off" spellcheck="false">'
-        f'<p class="hint">{_esc(OWNER_HINT)}</p></div>'
-        "</div>"
-    )
-    actions = (
-        '<div class="actions">'
-        f'<button class="primary" type="submit" name="action" value="mount">'
-        f"{_esc(MOUNT_LABEL)}</button>"
-        f'<button class="ghost" type="submit" name="action" value="survey">'
-        f"{_esc(REFRESH_LABEL)}</button>"
-        "</div>"
-    )
+# --- the look every redesigned screen shares (PLAN-0027) ---------------
+# The pieces Projects, one project and Add a project are all drawn from:
+# a status as a mark and a word, a line a reader may copy, the one switch
+# for a screen's commands, the result line, and the skill grid's frame.
+# The manage page draws its screens with these same functions, so the two
+# pages cannot drift apart in look.
+
+def symbol(kind: str) -> str:
+    """A status's mark: a glyph in an outline, found by shape and never
+    by color, and hidden from a reader by ear because the words beside it
+    say the same thing."""
+    glyph, shape = MARKS[kind]
+    return f'<span class="symbol {shape}" aria-hidden="true">{glyph}</span>'
+
+
+def state_mark(kind: str, said: str) -> str:
+    """A status as its mark and its words."""
+    return f'<span class="state">{symbol(kind)}<span>{_esc(said)}</span></span>'
+
+
+def copy_line(text: str) -> str:
+    """One line a reader may copy, with the button that copies it."""
     return (
-        f"<h1>{_esc(REVIEW_HEAD)}</h1>"
-        f'<p class="lede">{_esc(REVIEW_LEDE)}</p>'
-        '<div class="root"><span class="label">Project</span>'
-        f"<code>{_esc(session.root)}</code></div>"
+        f'<div class="copy-line"><code>{_esc(text)}</code>'
+        f'<button class="copy" type="button" data-copy="{_attr(text)}" '
+        f'aria-label="{_attr(COPY_NAME.format(command=text))}">'
+        f"{_esc(COPY_LABEL)}</button></div>"
+    )
+
+
+def show_commands() -> str:
+    """The one switch a screen carries for its commands. The stylesheet
+    reads the box, so it works with no script."""
+    return (
+        '<label class="check"><input type="checkbox" class="show-commands">'
+        f"{_esc(SHOW_COMMANDS)}</label>"
+    )
+
+
+def result_line(tone: str, sentence: str, *, warning: str = "",
+                changed=(), notes=(), more: str = "") -> str:
+    """The one line a press answers with, at the top of the screen it was
+    made on (PLAN-0027 phase 1 prescription 6).
+
+    `tone` is `RESULT_DONE`, `RESULT_PARTLY` or `RESULT_FAILED`, and picks
+    the mark. `sentence` is the line from `wording.md`. `warning` is the
+    after-press sentence for a press that wrote the client's settings
+    while it was open. Details opens on `notes`, each a sentence, on
+    `more`, markup such as a line to copy, and on `changed`, each a path
+    or a `(path, tag)` pair such as `("docs/plan.md", "updated")`; with
+    none of them there is no Details.
+    """
+    said = f"<p>{_esc(sentence)}</p>"
+    if warning:
+        said += f'<p class="warn">{_esc(warning)}</p>'
+    items = "".join(f"<p>{_esc(note)}</p>" for note in notes) + more
+    rows = []
+    for item in changed:
+        path, tag = (item, "") if isinstance(item, str) else item
+        shown = _esc(mnt.one_line(str(path)))
+        rows.append(
+            f'<li><code>{shown}</code>'
+            + (f" {MIDDOT} {_esc(tag)}" if tag else "") + "</li>")
+    if rows:
+        items += f'<ul>{"".join(rows)}</ul>'
+    details = (
+        f"<details><summary>{_esc(DETAILS_LABEL)}</summary>"
+        f'<div class="drawer">{items}</div></details>'
+    ) if items else ""
+    return (
+        f'<div class="result {_attr(tone)}" role="status" aria-live="polite">'
+        f'{symbol(RESULT_MARKS.get(tone, WORKING))}<div class="words">{said}</div>'
+        f"{details}</div>"
+    )
+
+
+def blocked_above(root, s: sk.SkillState) -> bool:
+    """Whether a file stands where a folder on the way to the skill's own
+    folder goes, such as the agent's skills folder: the engine refuses to
+    add the skill there, as it refuses a file at the skill's folder."""
+    base = Path(root)
+    parts = s.dir_rel.strip("/").split("/")
+    for i in range(1, len(parts)):
+        here = base.joinpath(*parts[:i])
+        try:
+            if here.exists() and not here.is_dir():
+                return True
+        except OSError:
+            return True
+    return False
+
+
+def grid_head(label: str, press: str = "") -> str:
+    """One agent's column head of the skill grid: its label, and the
+    column's own press beside it where it has one."""
+    return (f'<th scope="col"><span class="agent-head">'
+            f"<span>{_esc(label)}</span>{press}</span></th>")
+
+
+def grid_row(name: str, summary: str, cells: str, *, cls: str = "") -> str:
+    """One skill's row of the grid: its name and its one line, once, then
+    the cells, one per agent."""
+    opened = f'<tr class="{cls}">' if cls else "<tr>"
+    return (
+        f'{opened}<th scope="row"><span class="skill-info"><strong>{_esc(name)}</strong>'
+        f"<small>{_esc(summary)}</small></span></th>{cells}</tr>"
+    )
+
+
+def skill_grid(heads: str, body: str) -> str:
+    """The skill grid: one row per skill, one column per agent in the
+    harness map's order. Both screens that list skills draw this table."""
+    return (
+        '<table class="skill-grid"><thead><tr>'
+        f'<th scope="col"><h2>{_esc(SKILLS_HEAD)}</h2></th>{heads}</tr></thead>'
+        f"<tbody>{body}</tbody></table>"
+    )
+
+
+# --- Add a project (PLAN-0027 phase 2) ---------------------------------
+# One screen, served by `radialrig setup` and, inside the app, by the
+# manage page: a heading naming the folder, two sentences, the skill
+# grid, the Connect box, the one amber press, and Details. A folder that
+# can't be set up says why on a card, and a press answers with one result
+# line. The bodies below draw every state of it; the page around them
+# hands in what is its own to add.
+
+@dataclass(frozen=True)
+class Frame:
+    """What the page around this screen adds to it.
+
+    `radialrig setup` serves the screen bare: leaving the page is its way
+    out, and its server stops once a press finishes. The app's page
+    stands, so it hands in the way back to Projects and the press that
+    opens another project's screen.
+    """
+
+    # A GET form, carrying the id `LEAVE_ID`, that leads back to Projects.
+    # The screen's back link and Cancel submit it by that id, since they
+    # stand inside the screen's own form and a form cannot hold another.
+    leave: str = ""
+    # Whether the server goes on standing after a finished state.
+    stands: bool = False
+    # (folder: Path, label: str) -> the press that opens that folder's
+    # project screen, or None where there is no such screen to open.
+    opener: object | None = None
+    # The after-press sentence for a connect made while the client is
+    # open, a template with `{label}`.
+    running_after: str = RUNNING_AFTER_SETUP
+
+
+PLAIN = Frame()
+LEAVE_ID = "leave"
+
+
+def _project_word(root) -> str:
+    """The folder's own name, or the whole path for a drive root."""
+    return Path(root).name or str(root)
+
+
+def _agents_said() -> str:
+    """The agents' labels as one phrase, from the harness map."""
+    labels = [harness.label for harness in sk.HARNESSES.values()]
+    if len(labels) < 3:
+        return " and ".join(labels)
+    return ", ".join(labels[:-1]) + f", and {labels[-1]}"
+
+
+def _skills_said(count: int) -> str:
+    return SKILLS_ONE if count == 1 else SKILLS_MANY.format(count=count)
+
+
+def _name_head(session: Session, said: str) -> str:
+    """The screen's heading, with the folder's path beside it."""
+    return (
+        f'<div class="project-name"><h1>{_esc(said)}</h1>'
+        f'<span class="path">{_esc(session.root)}</span></div>'
+    )
+
+
+def _back(frame: Frame) -> str:
+    """The way back to Projects, where the page around the screen has one."""
+    if not frame.leave:
+        return ""
+    return (
+        f'<button class="link back" type="submit" form="{LEAVE_ID}">'
+        f'<span aria-hidden="true">{GLYPH_BACK}</span>{_esc(BACK_LABEL)}</button>'
+    )
+
+
+def _cancel(frame: Frame) -> str:
+    if not frame.leave:
+        return ""
+    return (
+        f'<button class="link quiet" type="submit" form="{LEAVE_ID}">'
+        f"{_esc(CANCEL_LABEL)}</button>"
+    )
+
+
+def _closing(state: PageState, frame: Frame, said: str) -> str:
+    """What a finished page says about its server, where it has stopped."""
+    if frame.stands or not state.terminal:
+        return ""
+    return f'<p class="closing">{_esc(said)}</p>'
+
+
+def _is_set_up(session: Session) -> bool:
+    try:
+        return mnt.is_mounted(session.root)
+    except OSError:
+        return False
+
+
+# --- the grid, as tick boxes ------------------------------------------
+
+def _face(cls: str, glyph: str, label: str) -> str:
+    return (f'<span class="face {cls}" aria-hidden="true">'
+            f"<span>{glyph}</span>{_esc(label)}</span>")
+
+
+def _setup_cell(session: Session, s: sk.SkillState) -> tuple[str, str]:
+    """One agent's cell for one skill on this screen, and the box's key
+    where the cell is a box.
+
+    The screen adds and never removes, so a skill the folder already has
+    for that agent reads On and is no control. One it lacks is a tick box
+    that reads Off until ticked; a clean copy the package has moved past
+    is a box that reads Update. A place the engine would refuse to add
+    into reads as its reason, as on the project screen.
+    """
+    agent = s.harness.label
+    if s.dir_is_file or (s.record_entry is None and blocked_above(session.root, s)):
+        return f'<span class="cell-note">{_esc(CELL_REASONS[CELL_FILE])}</span>', ""
+    if s.foreign:
+        return f'<span class="cell-note">{_esc(CELL_REASONS[CELL_FOREIGN])}</span>', ""
+    if s.current or s.edited or (s.record_entry is not None and s.foreign_files):
+        return (
+            f'<span class="face on has"><span aria-hidden="true">{GLYPH_CHECK}</span>'
+            f"{_esc(CELL_ON_LABEL)}</span>", "")
+    update = sk.behind(s)
+    key = box_value(s.harness.name, s.name)
+    ticked = (s.harness.name, s.name) in session.skills
+    name = (CELL_UPDATE_NAME if update else CELL_NAME).format(skill=s.name, agent=agent)
+    off = (_face("update unticked", GLYPH_UP, CELL_UPDATE_LABEL) if update
+           else _face("off unticked", GLYPH_MINUS, CELL_OFF_LABEL))
+    on = _face("on ticked", GLYPH_CHECK, CELL_UPDATE_LABEL if update else CELL_ON_LABEL)
+    return (
+        '<label class="toggle"><input type="checkbox" name="skill" '
+        f'value="{_attr(key)}" data-agent="{_attr(s.harness.name)}" '
+        f'data-shows="{_attr(key)}" aria-label="{_attr(name)}"'
+        f'{" checked" if ticked else ""}>{off}{on}</label>', key)
+
+
+def _setup_grid(session: Session, catalog) -> tuple[str, tuple]:
+    """The skill grid for this screen, and the boxes it drew, in the
+    order a press adds them: agent by agent in map order, skill by skill
+    in catalog order.
+
+    The same table the project screen draws. There a cell is a press that
+    runs at once; here it is a tick box, because nothing is written until
+    the screen's one press. Add all ticks its column and writes nothing;
+    the script wires it, so it ships hidden and a page with no script
+    shows no dead control.
+    """
+    if not catalog:
+        return "", ()
+    harnesses = tuple(sk.HARNESSES.values())
+    by = {(s.harness.name, s.name): s for s in catalog}
+    names: list[str] = []
+    for s in catalog:
+        if s.name not in names:
+            names.append(s.name)
+    drawn: dict[tuple[str, str], tuple[str, str]] = {
+        pair: _setup_cell(session, s) for pair, s in by.items()}
+    body = ""
+    for name in names:
+        cells = "".join(
+            f"<td>{drawn[(h.name, name)][0] if (h.name, name) in drawn else ''}</td>"
+            for h in harnesses)
+        summary = next(
+            (by[(h.name, name)].packaged.summary for h in harnesses
+             if (h.name, name) in by), "")
+        body += grid_row(name, summary, cells)
+    heads = ""
+    boxes = []
+    for harness in harnesses:
+        column = [by[(harness.name, name)] for name in names
+                  if drawn.get((harness.name, name), ("", ""))[1]]
+        boxes.extend(column)
+        press = (
+            f'<button class="link" type="button" data-all="{_attr(harness.name)}" '
+            f'aria-label="{_attr(ADD_ALL_NAME.format(agent=harness.label))}" hidden>'
+            f"{_esc(ADD_ALL_LABEL)}</button>"
+        ) if column else ""
+        heads += grid_head(harness.label, press)
+    return skill_grid(heads, body), tuple(boxes)
+
+
+def _ticks(session: Session, catalog) -> bool:
+    """Whether the grid draws any tick box: the cells `_setup_grid` draws
+    as boxes, asked the same way, so a server stops exactly where its
+    screen offers no skill to add."""
+    return any(_setup_cell(session, s)[1] for s in catalog)
+
+
+# --- the Connect box ---------------------------------------------------
+
+@dataclass(frozen=True)
+class _Offer:
+    """The connection, as this screen offers or withholds it."""
+
+    client: object | None = None   # the client the press would connect
+    box: str = ""                  # what the screen shows for it
+    files: str = ""                # what Details lists for it
+    key: str = ""                  # the box's key, for what follows it
+    shown: bool = False            # whether what follows it stands now
+
+
+def _connect_key(client) -> str:
+    return f"connect:{client.name}"
+
+
+def _running_before(client, paths) -> str:
+    """The before-press sentence while the client is open (BUG-0018)."""
+    if not cn.is_running(client, paths):
+        return ""
+    return f'<p class="warn">{_esc(report.client_running_before(client))}</p>'
+
+
+def _connect_gap(session: Session) -> str:
+    """Why no box stands, where the reason is one a person can act on:
+    the client is on this computer, the folder is not connected, and
+    RadialRig cannot find its own rule lookup program. A computer with no
+    such client, or a folder already connected, is told nothing."""
+    try:
+        client = cn.client_for(cn.DEFAULT_CLIENT)
+        if not cn.detect(client) or cn.is_connected(session.root, client.name):
+            return ""
+    except (cn.ConnectError, OSError):
+        return ""
+    try:
+        cn.read_command()
+    except cn.ConnectError:
+        return CONNECT_NO_PROGRAM.format(label=client.label)
+    except OSError:
+        return ""
+    return ""
+
+
+def _withheld(state: PageState) -> tuple[str, str]:
+    """A connection the engine's plan refused when the screen was drawn:
+    the sentence that stands in the box's place, and what Details lists.
+    The setup itself is not held back by it."""
+    client = cn.client_for(cn.DEFAULT_CLIENT)
+    codes = {d.code for d in state.withheld}
+    taken = CONNECT_NAME_TAKEN_SET_UP if state.kind == ALREADY else CONNECT_NAME_TAKEN
+    said = taken if mnt.CONNECT_KEY_HOST_OWNED in codes else CONNECT_BLOCKED
+    rows = "".join(
+        f"<li>{_esc(mnt.one_line(d.path))}: "
+        f"{_esc(mnt.one_line(mnt.reason_text(d) or ''))}</li>"
+        for d in state.withheld)
+    files = (
+        f"<h3>{_esc(CONNECT_BLOCKERS_HEAD.format(label=client.label))}</h3>"
+        f"<ul>{rows}</ul>"
+    ) if rows else ""
+    return f'<p class="said">{_esc(said.format(label=client.label))}</p>', files
+
+
+def _offer(session: Session, state: PageState, *, press: bool = False) -> _Offer:
+    """The Connect box, unticked to begin with, its sentence under it, and
+    the before-press sentence while the client is open.
+
+    With `press`, the offer is the screen's whole press: a set-up project
+    with every skill is here for the connection, so it gets the client's
+    row with Connect in it, and the form carries the box's field already
+    set. The posted value is filtered against the client table before
+    anything downstream reads it.
+    """
+    client = state.client
+    if client is None:
+        if state.withheld:
+            said, files = _withheld(state)
+            return _Offer(box=f'<div class="offer">{said}</div>', files=files)
+        gap = _connect_gap(session)
+        box = f'<div class="offer"><p class="said">{_esc(gap)}</p></div>' if gap else ""
+        return _Offer(box=box)
+    try:
+        targets = cn.detect(client)
+        key = cn.entry_key(client, session.scope)
+        write_key = cn.write_entry_key(client, session.scope)
+    except (cn.ConnectError, OSError):
+        return _Offer()
+    paths = [target.path for target in targets]
+    hint = f'<p class="hint">{_esc(CONNECT_HINT.format(label=client.label))}</p>'
+    name = CONNECT_BOX.format(label=client.label)
+    box_key = _connect_key(client)
+    if press:
+        box = (
+            '<div class="offer one-press">'
+            f'<input type="hidden" name="connect" value="{_attr(client.name)}">'
+            f'<div class="link"><strong>{_esc(client.label)}</strong>'
+            + state_mark(NOT_SET_UP, NOT_CONNECTED)
+            + '<button class="primary" type="submit" name="action" value="skills">'
+            + f"{_esc(name)}</button></div>"
+            + hint + _running_before(client, paths) + "</div>"
+        )
+    else:
+        checked = " checked" if session.connect else ""
+        box = (
+            '<div class="offer">'
+            '<label class="check"><input type="checkbox" name="connect" '
+            f'value="{_attr(client.name)}" data-shows="{_attr(box_key)}"{checked}>'
+            f"{_esc(name)}</label>"
+            + hint + _running_before(client, paths) + "</div>"
+        )
+    shown = session.connect or press
+    files = (
+        f"<div{_follows((box_key,), shown)}>"
+        f"<h3>{_esc(CLIENT_FILES_HEAD.format(label=client.label))}</h3>"
+        f"<p>{_esc(CLIENT_KEYS.format(key=key, write_key=write_key))}</p><ul>"
+        + "".join(f"<li><code>{_esc(path)}</code></li>" for path in paths)
+        + "</ul></div>"
+    )
+    return _Offer(client=client, box=box, files=files, key=box_key, shown=shown)
+
+
+# --- Details -----------------------------------------------------------
+
+def _follows(keys, shown: bool) -> str:
+    """The attributes of a line that stands only while one of its boxes
+    is ticked. The server draws it as the last post left the boxes; the
+    script keeps it in step with them from there."""
+    return f' data-for="{_attr(" ".join(keys))}"' + ("" if shown else " hidden")
+
+
+FILE_TAGS = {
+    mnt.APPENDED: FILE_ADDS_TO,
+    mnt.MERGED: FILE_ADDS_TO,
+    mnt.CURRENT: FILE_ALREADY,
+}
+
+
+def _file_items(session: Session, state: PageState, boxes, offer: _Offer) -> str:
+    """Every file the press writes into the folder: the setup's own, then
+    each ticked skill's folder and its agent's record, then the
+    connection's record. A skill's lines and the connection's stand only
+    while their boxes are ticked."""
+    items = ""
+    for d in state.dispositions:
+        tag = FILE_TAGS.get(d.verb)
+        items += (
+            f"<li><code>{_esc(mnt.one_line(d.path))}</code>"
+            + (f" {MIDDOT} {_esc(tag)}" if tag else "") + "</li>")
+    ticked = set(session.skills)
+    for harness in sk.HARNESSES.values():
+        mine = [s for s in boxes if s.harness.name == harness.name]
+        for s in mine:
+            key = box_value(harness.name, s.name)
+            items += (
+                f"<li{_follows((key,), (harness.name, s.name) in ticked)}>"
+                f"<code>{_esc(s.dir_rel)}/</code></li>")
+        if mine:
+            keys = [box_value(harness.name, s.name) for s in mine]
+            any_ticked = any((harness.name, s.name) in ticked for s in mine)
+            items += (
+                f"<li{_follows(keys, any_ticked)}>"
+                f"<code>{_esc(harness.record)}</code></li>")
+    if offer.key:
+        items += (
+            f"<li{_follows((offer.key,), offer.shown)}>"
+            f"<code>{_esc(cn.CONNECT_REL)}</code></li>")
+    if not items:
+        return ""
+    return f'<h3>{_esc(FILES_HEAD)}</h3><ul class="files">{items}</ul>'
+
+
+def press_commands(session: Session, state: PageState, boxes=None,
+                   client=None) -> tuple[tuple[str, tuple, bool], ...]:
+    """Every command the screen's press could run, in the order it runs
+    them: the setup, then a line per skill box, then the connection.
+
+    Each is `(line, keys, shown)`: the boxes it follows, and whether the
+    last post left one of them ticked. A line with no key always runs. A
+    command with no safe spelling is left out rather than drawn as an
+    empty frame (setup-web-04).
+    """
+    out: list[tuple[str, tuple, bool]] = []
+    if state.kind == REVIEW:
+        out.append((mount_line(session), (), True))
+    ticked = set(session.skills)
+    if boxes is None:
+        boxes = _setup_grid(session, state.catalog)[1]
+    for s in boxes:
+        pair = (s.harness.name, s.name)
+        try:
+            line = skill_add_line(s.harness.name, s.name, session.root)
+        except Unquotable:
+            line = ""
+        out.append((line, (box_value(*pair),), pair in ticked))
+    if client is None:
+        client = state.client
+    if client is not None:
+        try:
+            line = connect_line(client.name, session.root)
+        except Unquotable:
+            line = ""
+        out.append((line, (_connect_key(client),), session.connect))
+    return tuple(item for item in out if item[0])
+
+
+def ran_commands(session: Session, state: PageState) -> tuple[str, ...]:
+    """Every command a finished press ran, in the order it ran them: the
+    setup, then a line per (agent, skill) pair it wrote for, then the
+    connection where it was made.
+
+    A step that did not land earns no line, so no line claims an add or a
+    connection that never happened (PLAN-0015 phase 3 prescription 2), and
+    a command with no safe spelling is left out (setup-web-04). Running
+    these lines does what the press did.
+    """
+    out: list[str] = []
+    if state.kind == MOUNTED:
+        out.append(mount_line(session))
+    for harness, name in state.added:
+        try:
+            out.append(skill_add_line(harness, name, session.root))
+        except Unquotable:
+            continue
+    if state.connect and state.client is not None:
+        try:
+            out.append(connect_line(state.client.name, session.root))
+        except Unquotable:
+            pass
+    return tuple(line for line in out if line)
+
+
+def _ran_items(lines, *, switch: bool) -> str:
+    """The commands a press ran, for its result line's Details, shown
+    while the screen's Show commands box is ticked. `switch` draws that
+    box here, for a screen that carries none of its own."""
+    if not lines:
+        return ""
+    return ((show_commands() if switch else "")
+            + f'<div class="commands"><h3>{_esc(COMMANDS_HEAD)}</h3>'
+            + "".join(copy_line(line) for line in lines) + "</div>")
+
+
+def _command_items(commands, *, always: bool = False) -> str:
+    """The commands, under their heading, shown while the screen's Show
+    commands box is ticked."""
+    lines = ""
+    for line, keys, shown in commands:
+        if keys and not always:
+            lines += f"<div{_follows(keys, shown)}>{copy_line(line)}</div>"
+        else:
+            lines += copy_line(line)
+    if not lines:
+        return ""
+    return f'<div class="commands"><h3>{_esc(COMMANDS_HEAD)}</h3>{lines}</div>'
+
+
+def _names(session: Session) -> str:
+    """The two names the setup writes into the project, and the press that
+    redraws the screen with them. The commands spell the names, and a
+    connection is keyed by the project's, so both follow a changed name
+    only once the server has drawn the screen again."""
+    return (
+        '<div class="names">'
+        f'<label>{_esc(SCOPE_LABEL)}<input id="scope" name="scope" '
+        f'value="{_attr(session.scope)}" autocomplete="off" spellcheck="false"></label>'
+        f'<label>{_esc(OWNER_LABEL)}<input id="owner" name="owner" '
+        f'value="{_attr(session.owner)}" autocomplete="off" spellcheck="false"></label>'
+        '<button class="refresh" type="submit" name="action" value="survey">'
+        f"{_esc(REFRESH_LABEL)}</button></div>"
+        f'<p class="hint">{_esc(REFRESH_HINT)}</p>'
+    )
+
+
+def _settings(inner: str) -> str:
+    """Details, closed to begin with."""
+    if not inner:
+        return ""
+    return (
+        f'<details class="settings"><summary>{_esc(DETAILS_LABEL)}</summary>'
+        f'<div class="drawer">{inner}</div></details>'
+    )
+
+
+# --- the screen's states ----------------------------------------------
+
+def _review_body(session: Session, state: PageState, frame: Frame = PLAIN) -> str:
+    """Ready to set up: the folder, what a setup adds, the skills, the
+    Connect box, and the one press."""
+    grid, boxes = _setup_grid(session, state.catalog)
+    offer = _offer(session, state)
+    commands = _command_items(press_commands(session, state, boxes, offer.client))
+    details = _settings(
+        (show_commands() if commands else "")
+        + _names(session)
+        + _file_items(session, state, boxes, offer)
+        + offer.files
+        + commands
+    )
+    # The two sentences on lines of their own, as mockup 04-add-project
+    # sets them (PLAN-0027 phase 5).
+    intro = (f"{_esc(INTRO_ADDS.format(agents=_agents_said()))}<br>\n"
+             f"{_esc(INTRO_KEEPS)}")
+    return (
+        '<div class="screen setup">'
+        + frame.leave
         + _form(
             session,
             _choices()
-            + fields
-            + _mount_table(state.dispositions)
-            + _skills_fieldset(session, state.catalog)
-            # Two tables, not one merged one: the mount's caption and the
-            # skills' caption each say what their own button writes, and
-            # what the tables show is exactly what the one press does.
-            + _plan_table(state.skills, SKILLS_PLAN_CAPTION, count=False)
-            + _connect_fieldset(session, state.client)
-            + _plan_table(state.connect, CONNECT_PLAN_CAPTION, count=False)
-            + _notice(state)
-            + f'<p class="note">{_esc(READ_SERVER_NOTE)}</p>'
-            + actions,
+            + _back(frame)
+            + _name_head(session, SETUP_HEAD.format(project=_project_word(session.root)))
+            + f'<p class="intro">{intro}</p>'
+            + grid
+            + offer.box
+            + '<div class="setup-actions">'
+            + '<button class="primary" type="submit" name="action" value="mount">'
+            + f"{_esc(SETUP_LABEL)}</button>"
+            + _cancel(frame)
+            + details
+            + "</div>",
         )
-    )
-
-
-def _mounted_body(session: Session, state: PageState) -> str:
-    result = state.result
-    step, validate = report.next_step(result.root)
-    skills = (
-        f'<li><span class="what">{SKILLS_REVERSIBLE}</span>'
-        + _command("radialrig skill list") + "</li>"
-        if state.skills else ""
-    )
-    connect = (
-        f'<li><span class="what">{CONNECT_REVERSIBLE}</span></li>'
-        if state.connect else ""
-    )
-    return (
-        f"<h1>Mounted onto {_esc(result.scope)}.</h1>"
-        f'<p class="meta">radialrig {_esc(result.version)} &middot; scope: '
-        f"{_esc(result.scope)} &middot; owner: {_esc(result.owner)}</p>"
-        + _plan_table(state.dispositions, WROTE_CAPTION)
-        + _plan_table(state.skills, SKILLS_WROTE_CAPTION)
-        + _skill_lines(session, state)
-        + _plan_table(state.connect, CONNECT_WROTE_CAPTION)
-        + '<ul class="steps">'
-        + f'<li><span class="what">{_esc(step)}</span>'
-        + _command(validate) + "</li>"
-        + skills
-        + connect
-        + f'<li><span class="what">{REVERSIBLE}</span>'
-        + _command("radialrig unmount") + "</li>"
-        + "</ul>"
-        + _notice(state)
-        + f'<p class="closing">{_esc(STOPPED)}</p>'
-        + _restart_line(state)
-    )
-
-
-def _skilled_body(session: Session, state: PageState) -> str:
-    connect = (
-        f'<li><span class="what">{CONNECT_REVERSIBLE}</span></li>'
-        if state.connect else ""
-    )
-    return (
-        f"<h1>{_esc(SKILLS_DONE_HEAD)}</h1>"
-        + _plan_table(state.skills, SKILLS_WROTE_CAPTION)
-        + _skill_lines(session, state)
-        + _plan_table(state.connect, CONNECT_WROTE_CAPTION)
-        + '<ul class="steps">'
-        + f'<li><span class="what">{_esc(report.SKILL_NEXT_STEP)}</span>'
-        + _command("radialrig skill list") + "</li>"
-        + f'<li><span class="what">{SKILLS_REVERSIBLE}</span></li>'
-        + connect
-        + "</ul>"
-        + _notice(state)
-        + f'<p class="closing">{_esc(STOPPED)}</p>'
-        + _restart_line(state)
-    )
-
-
-def _connected_body(session: Session, state: PageState) -> str:
-    """The connect step on its own, for a project already mounted."""
-    return (
-        f"<h1>{_esc(CONNECT_DONE_HEAD)}</h1>"
-        + _plan_table(state.connect, CONNECT_WROTE_CAPTION)
-        + '<ul class="steps">'
-        + f'<li><span class="what">{CONNECT_REVERSIBLE}</span></li>'
-        + "</ul>"
-        + f'<p class="closing">{_esc(STOPPED)}</p>'
-        + _restart_line(state)
-    )
-
-
-def _connect_failed_body(session: Session, state: PageState) -> str:
-    """The press was the registration, and it did not run, or it stopped
-    part way through its write.
-
-    No table and no restart line: there is nothing to restart for. The
-    head states that much and the engine's own sentence says why.
-    """
-    head = PARTIAL_HEAD if state.outcome == report.PARTIAL else CONNECT_FAILED_HEAD
-    return (
-        f"<h1>{_esc(head)}</h1>"
-        + (f'<p class="said">{_esc(state.message)}</p>' if state.message else "")
-        + log_said()
-        + f'<p class="closing">{_esc(STOPPED)}</p>'
-    )
-
-
-def _conflict_body(session: Session, state: PageState) -> str:
-    # The command line's own first line is the heading, so a refusal that
-    # words its head differently — the connect's does, because it inserts
-    # and overwrites nothing — reads the same on both surfaces.
-    head = state.lines[0] if state.lines else report.refusal_head(
-        len(state.dispositions))
-    # The refusal is this state's whole message, so it is the document's
-    # heading as well as its live region: a reader landing by heading has
-    # somewhere to land.
-    return (
-        '<div class="refusal" role="status" aria-live="polite">'
-        f'<h1 class="head">{_esc(head)}</h1>'
-        + _plan_table(state.dispositions, CONFLICT_CAPTION)
         + "</div>"
-        # One refusal state, two remedies: the skills kit's own sentence
-        # rides in `message`, and the mount's is the default. Neither
-        # carries a control that could force past the refusal.
-        + f'<p class="note">{_esc(state.message or report.REFUSAL_REMEDY)}</p>'
-        + _form(
-            session,
-            '<div class="actions">'
-            f'<button class="primary" type="submit" name="action" value="survey">'
-            f"{_esc(CHECK_AGAIN_LABEL)}</button></div>",
-        )
     )
 
 
-def _head_with_root(line: str, root) -> str:
-    """The command line's first line as a heading, with the project path
-    set in mono rather than in the display face.
+def _already_body(session: Session, state: PageState, frame: Frame = PLAIN) -> str:
+    """A folder that is already set up: what it has, and what it can
+    still be given from here, the skills it lacks or, when it has every
+    skill, the connection (PLAN-0027 phase 2 prescription 3)."""
+    grid, boxes = _setup_grid(session, state.catalog)
+    only_connect = not boxes and state.client is not None
+    offer = _offer(session, state, press=only_connect)
+    offered = bool(boxes) or offer.client is not None
+    commands = _command_items(
+        press_commands(session, state, boxes, offer.client), always=only_connect)
+    # A withheld connection's sentence sends the reader to Details, so
+    # Details stands for it even where nothing else is offered (review F3).
+    details = _settings(
+        (show_commands() if commands else "")
+        + _file_items(session, state, boxes, offer)
+        + offer.files
+        + commands
+    ) if offered or offer.files else ""
+    said = ALREADY_OFFERS if offered else ALREADY_COMPLETE
+    press = (
+        '<button class="primary" type="submit" name="action" value="skills">'
+        f"{_esc(ADD_LABEL)}</button>"
+    ) if offered and not only_connect else ""
+    actions = press + _cancel(frame) + details
+    inner = (
+        _back(frame)
+        + _name_head(session, _project_word(session.root))
+        + f'<p class="intro">{_esc(said)}</p>'
+        + grid
+        + offer.box
+        + (f'<div class="setup-actions">{actions}</div>' if actions else "")
+    )
+    if offered:
+        inner = _form(session, _choices() + inner)
+    return (
+        '<div class="screen setup">' + frame.leave + inner
+        + _closing(state, frame, CLOSED) + "</div>"
+    )
 
-    The heading reads character for character as the terminal's line
-    does; only the path's typography differs. A line that does not end in
-    this project's path is left whole, so a change in `report` cannot
-    make this render something the command line did not say.
+
+def folder_path(path) -> str:
+    """A folder's path, drawn so a line wraps only after a separator.
+
+    Each piece up to and including a separator is one the line can't
+    split, with a break offered after it, so "lap-notes" never wraps into
+    "lap-" and "notes", which read as two names. A piece wider than the
+    whole line still wraps inside itself (PLAN-0027 phase 5, C3)."""
+    pieces = [piece for piece in re.split(r"(?<=[\\/])", str(path)) if piece]
+    return "<wbr>".join(f'<span class="seg">{_esc(piece)}</span>' for piece in pieces)
+
+
+def stopped_card(frame: Frame, *, head: str, path, said: str,
+                 details: str = "", press: str = "", after: str = "",
+                 code: str = "") -> str:
+    """A setup that can't start, or stopped: one card saying so.
+
+    The status, the heading, the folder, one sentence of why, what is in
+    the way behind Details, and the next step. No control forces past a
+    refusal, because the command line has none. The card is the state's
+    whole message, so it is the live region too. `code` is a file name
+    the sentence holds, set as code there, as mockup 04-add-conflict sets
+    `.mcp.json` (PLAN-0027 phase 5, C2).
     """
-    tail = str(root)
-    if line.endswith(tail) and len(line) > len(tail):
-        return (
-            f'<h1 class="record">{_esc(line[: -len(tail)])}'
-            f"<code>{_esc(tail)}</code></h1>"
-        )
-    return f"<h1>{_esc(line)}</h1>"
-
-
-def _already_body(session: Session, state: PageState) -> str:
-    lines = list(state.lines)
-    body = _head_with_root(lines[0], session.root)
-    for line in lines[1:]:
-        body += f'<p class="said">{_esc(line)}</p>'
-    body += _command("radialrig upgrade")
-    if state.terminal:
-        # Byte for byte what this state has always been: a mounted
-        # project with nothing left for the page to do — plus the one
-        # aside, when an offer was withdrawn rather than never made.
-        return body + _notice(state) + f'<p class="closing">{_esc(STOPPED)}</p>'
-    # One button for both offers. Its label names whichever offer stands:
-    # a project with every skill installed is here for the registration.
-    label = SKILLS_LABEL if any(not s.current for s in state.catalog) else CONNECT_LABEL
-    return body + _form(
-        session,
-        _choices()
-        + _skills_fieldset(session, state.catalog)
-        + _plan_table(state.skills, SKILLS_PLAN_CAPTION, count=False)
-        + _connect_fieldset(session, state.client)
-        + _plan_table(state.connect, CONNECT_PLAN_CAPTION, count=False)
-        + _notice(state)
-        + '<div class="actions">'
-        + '<button class="primary" type="submit" name="action" value="skills">'
-        + f"{_esc(label)}</button></div>",
+    sentence = _esc(said)
+    if code:
+        sentence = sentence.replace(_esc(code), f"<code>{_esc(code)}</code>", 1)
+    zone = press + _cancel(frame)
+    return (
+        '<div class="screen setup stopped">' + frame.leave
+        + '<div class="stage"><section class="card" role="status" aria-live="polite">'
+        + f'<p class="stopped-row">{state_mark(GONE, STOPPED_STATE)}</p>'
+        + f"<h1>{_esc(head)}</h1>"
+        + f'<p class="path">{folder_path(path)}</p>'
+        + f"<p>{sentence}</p>"
+        + (f"<details><summary>{_esc(DETAILS_LABEL)}</summary>"
+           f'<div class="drawer">{details}</div></details>' if details else "")
+        + (f'<div class="action-zone">{zone}</div>' if zone else "")
+        + after
+        + "</section></div></div>"
     )
+
+
+def _card(session: Session, frame: Frame, **said) -> str:
+    """The card, for this session's folder."""
+    return stopped_card(frame, path=session.root, **said)
+
+
+def _setup_word(session: Session) -> str:
+    """The heading of a card: the setup it stopped, or, where the folder
+    is set up already and the press was adding to it, the folder's name."""
+    name = _project_word(session.root)
+    return name if _is_set_up(session) else SETUP_HEAD.format(project=name)
+
+
+def _check_again(session: Session) -> str:
+    """Check again: the survey once more, with the boxes left as they
+    were, since this form draws none and carries no marker."""
+    return _form(
+        session,
+        '<button class="primary" type="submit" name="action" value="survey">'
+        f"{_esc(CHECK_AGAIN_LABEL)}</button>",
+    )
+
+
+def _blocker_rows(dispositions, resolve) -> str:
+    rows = "".join(
+        f"<li><code>{_esc(mnt.one_line(d.path))}</code>: "
+        f"{_esc(mnt.one_line(resolve(d) or ''))}</li>"
+        for d in dispositions)
+    return f"<h3>{_esc(BLOCKERS_HEAD)}</h3><ul>{rows}</ul>" if rows else ""
+
+
+def _conflict_body(session: Session, state: PageState, frame: Frame = PLAIN) -> str:
+    """A refused setup. Four refusals reach this state, and each says its
+    own sentence: files in the way, a folder inside a set-up project, a
+    ticked skill's place taken, and the client's settings blocking a
+    ticked connection. Every one of them wrote nothing."""
+    head = _setup_word(session)
+    if state.why == WHY_INSIDE:
+        parent = Path(state.parent)
+        word = _project_word(parent)
+        details = (
+            f"<p>{_esc(INSIDE_WHY.format(folder=_project_word(session.root)))}</p>"
+            f"<p>{_esc(INSIDE_WHERE.format(path=parent))}</p>"
+        )
+        press = (
+            frame.opener(parent, OPEN_PROJECT.format(parent=word))
+            if frame.opener is not None else _check_again(session))
+        return _card(
+            session, frame, head=head, said=INSIDE_SAID.format(parent=word),
+            details=details, press=press)
+    if state.why == WHY_SKILL:
+        said = SKILL_BLOCKED
+        details = _blocker_rows(state.dispositions, mnt.reason_text)
+    elif state.why == WHY_CONNECT:
+        client = cn.client_for(cn.DEFAULT_CLIENT)
+        said = CONNECT_REFUSED.format(label=client.label)
+        details = _blocker_rows(state.dispositions, mnt.reason_text)
+    else:
+        paths = [d.path for d in state.dispositions]
+        code = ""
+        if paths == [mnt.MCP_REL]:
+            said = BLOCKED_SETTINGS.format(file=mnt.MCP_REL)
+            code = mnt.MCP_REL
+        elif len(paths) == 1:
+            said = BLOCKED_ONE
+        else:
+            said = BLOCKED_MANY.format(count=len(paths))
+        details = _blocker_rows(
+            state.dispositions,
+            lambda d: MCP_REASON if d.path == mnt.MCP_REL else report.conflict_reason(d.path))
+        return _card(
+            session, frame, head=head, said=said, details=details,
+            press=_check_again(session), code=code)
+    return _card(
+        session, frame, head=head, said=said, details=details,
+        press=_check_again(session))
+
+
+def _engine_notes(state: PageState, *, log: bool) -> tuple[str, ...]:
+    """The engine's own sentences about a stop, for Details, and where
+    the log is. The sentence that says the connection was not attempted
+    is the result line's to say, in the screen's words.
+
+    The engine ends a file error's sentence "nothing was written" both
+    where the stop came before any write and where its writer put back
+    every file it wrote, and the page can't tell the two apart. So
+    Details says "nothing was changed", which is true of both (PLAN-0027
+    phase 2 review F7). The log keeps the engine's words."""
+    said = state.message
+    if said.endswith(CONNECT_NOT_ATTEMPTED):
+        said = said[: -len(CONNECT_NOT_ATTEMPTED)].rstrip()
+    said = said.replace(ENGINE_NO_WRITE, PAGE_NO_CHANGE)
+    notes = [said] if said else []
+    if log:
+        line = log_line()
+        if line:
+            notes.append(line)
+    return tuple(notes)
+
+
+def _changed(*groups) -> tuple[tuple[str, str], ...]:
+    """Each path a press changed or kept, tagged with what happened to it."""
+    return tuple(
+        (d.path, TAGS[d.verb]) for rows in groups for d in rows if d.verb in TAGS)
+
+
+def _added_count(state: PageState) -> int:
+    """How many skills the press added, each counted once whichever
+    agents it was added for."""
+    return len({name for _, name in state.added})
+
+
+def _client_label(state: PageState) -> str:
+    client = state.client or cn.client_for(cn.DEFAULT_CLIENT)
+    return client.label
+
+
+def _running_after(state: PageState, frame: Frame) -> str:
+    """The after-press sentence, for a press that connected while the
+    client was open (BUG-0018): a restart alone can lose the change. The
+    same for a connection that stopped partway and left the client's
+    settings changed, which carries its client for this (PLAN-0027 phase
+    2 review F2), as the app asks of the same press."""
+    client = state.client
+    if client is None or not (state.connect or state.left):
+        return ""
+    try:
+        paths = [target.path for target in cn.detect(client)]
+    except OSError:
+        return ""
+    if not cn.is_running(client, paths):
+        return ""
+    return frame.running_after.format(label=client.label)
+
+
+@dataclass(frozen=True)
+class Said:
+    """A press's answer, ready for `result_line`."""
+
+    tone: str
+    sentence: str
+    notes: tuple = ()
+    changed: tuple = ()
+    more: str = ""
+
+
+def setup_said(session: Session, state: PageState, *, switch: bool = True) -> Said:
+    """What the Set up project press did, as one result line.
+
+    The line says what was set up and, where the press's skills or its
+    connection did not land, what wasn't (PLAN-0027 phase 2 prescription
+    4). Details carries the next step with its command, every command the
+    press ran, the engine's own sentence about a step that stopped, and
+    every file the press changed. The app lands on the project's screen
+    with this same line; that screen has its own Show commands box, so it
+    passes `switch=False`.
+    """
+    project = _project_word(session.root)
+    label = _client_label(state)
+    count = _added_count(state)
+    skills = _skills_said(count)
+    pick_up = PICK_UP_ONE if count == 1 else PICK_UP_MANY
+    both = (BOTH_ONE if count == 1 else BOTH_MANY).format(label=label)
+    tone = RESULT_DONE
+    if MISSED_SKILLS in state.missed:
+        tone = RESULT_PARTLY
+        sentence = (SET_UP_SKILLS_LEFT if state.left else SET_UP_NO_SKILLS).format(
+            project=project)
+        if MISSED_CONNECT in state.missed:
+            sentence += " " + NOT_CONNECTED_EITHER.format(label=label)
+    elif MISSED_CONNECT in state.missed:
+        tone = RESULT_PARTLY
+        if count:
+            line = SET_UP_SKILLS_CONNECT_LEFT if state.left else SET_UP_SKILLS_NO_CONNECT
+        else:
+            line = SET_UP_CONNECT_LEFT if state.left else SET_UP_NO_CONNECT
+        sentence = line.format(
+            project=project, skills=skills, label=label, pick_up=pick_up)
+    elif count and state.connect:
+        sentence = SET_UP_BOTH.format(
+            project=project, skills=skills, label=label, both=both)
+    elif count:
+        sentence = SET_UP_SKILLS.format(project=project, skills=skills, pick_up=pick_up)
+    elif state.connect:
+        sentence = SET_UP_CONNECTED.format(project=project, label=label)
+    else:
+        sentence = SET_UP.format(project=project)
+    if not state.missed and state.outcome == report.PARTIAL:
+        tone = RESULT_PARTLY
+        sentence += " " + KEPT_EDITED
+    step, validate = report.next_step(session.root)
+    return Said(
+        tone, sentence,
+        notes=_engine_notes(state, log=bool(state.missed)),
+        changed=_changed(state.dispositions, state.skills, state.connect),
+        more=(f"<p>{_esc(step)}</p>" + copy_line(validate)
+              + _ran_items(ran_commands(session, state), switch=switch)),
+    )
+
+
+def added_said(session: Session, state: PageState, *, switch: bool = True) -> Said:
+    """What a press on a set-up project did: the skills it added, the
+    connection it made, or which of them it could not, and the commands
+    it ran."""
+    label = _client_label(state)
+    count = _added_count(state)
+    skills = _skills_said(count)
+    pick_up = PICK_UP_ONE if count == 1 else PICK_UP_MANY
+    both = (BOTH_ONE if count == 1 else BOTH_MANY).format(label=label)
+    tone = RESULT_DONE
+    if state.kind == CONNECTED:
+        sentence = CONNECTED_SAID.format(label=label)
+    elif state.kind == CONNECT_FAILED:
+        tone = RESULT_PARTLY if state.left else RESULT_FAILED
+        sentence = (CONNECT_STOPPED_SAID if state.left else CONNECT_FAILED_SAID).format(
+            label=label)
+    elif state.kind == FAILED:
+        tone = RESULT_PARTLY if state.left else RESULT_FAILED
+        sentence = SKILLS_STOPPED if state.left else SKILLS_FAILED
+        if MISSED_CONNECT in state.missed:
+            sentence += " " + NOT_CONNECTED_EITHER.format(label=label)
+    elif MISSED_CONNECT in state.missed and count:
+        tone = RESULT_PARTLY
+        sentence = (ADDED_CONNECT_LEFT if state.left else ADDED_NO_CONNECT).format(
+            skills=skills, label=label, pick_up=pick_up)
+    elif MISSED_CONNECT in state.missed:
+        tone = RESULT_PARTLY if state.left else RESULT_FAILED
+        sentence = (CONNECT_STOPPED_SAID if state.left else CONNECT_FAILED_SAID).format(
+            label=label)
+    elif not count:
+        sentence = (CONNECTED_SAID.format(label=label) if state.connect
+                    else NOTHING_ADDED)
+    elif state.connect:
+        sentence = ADDED_CONNECTED.format(skills=skills, label=label, both=both)
+    else:
+        sentence = ADDED.format(skills=skills, pick_up=pick_up)
+    if (state.kind == SKILLED and not state.missed
+            and state.outcome == report.PARTIAL):
+        tone = RESULT_PARTLY
+        sentence += " " + KEPT_EDITED
+    return Said(
+        tone, sentence,
+        notes=_engine_notes(state, log=tone != RESULT_DONE),
+        changed=_changed(state.skills, state.connect),
+        more=_ran_items(ran_commands(session, state), switch=switch),
+    )
+
+
+def _finished(session: Session, state: PageState, frame: Frame, said: Said) -> str:
+    """A press's answer on this screen: the project's name, the one
+    result line, and, from `radialrig setup`, the word that its server
+    has stopped."""
+    closing = STOPPED if said.tone == RESULT_DONE else (
+        CLOSED if said.tone == RESULT_PARTLY else CLOSED_RETRY)
+    return (
+        '<div class="screen setup done">' + frame.leave + _back(frame)
+        + _name_head(session, _project_word(session.root))
+        + result_line(
+            said.tone, said.sentence, warning=_running_after(state, frame),
+            changed=said.changed, notes=said.notes, more=said.more)
+        + _closing(state, frame, closing)
+        + "</div>"
+    )
+
+
+def _mounted_body(session: Session, state: PageState, frame: Frame = PLAIN) -> str:
+    return _finished(session, state, frame, setup_said(session, state))
+
+
+def _added_body(session: Session, state: PageState, frame: Frame = PLAIN) -> str:
+    return _finished(session, state, frame, added_said(session, state))
 
 
 def log_said() -> str:
     """The log line as a paragraph of a stop body, or nothing where this
-    platform keeps no log (PLAN-0018 phase 2). Both pages' stop bodies
-    draw it, so the sentence lives once."""
+    platform keeps no log (PLAN-0018 phase 2). The manage page's stop
+    bodies draw it, so the sentence lives once."""
     line = log_line()
     return f'<p class="said">{_esc(line)}</p>' if line else ""
 
 
-def _failed_body(session: Session, state: PageState) -> str:
-    """A stop. The head says whether it came before any write or part
-    way through one, which is what the outcome carries."""
-    head = PARTIAL_HEAD if state.outcome == report.PARTIAL else FAILED_HEAD
-    return (
-        f"<h1>{_esc(head)}</h1>"
-        f'<p class="said">{_esc(state.message)}</p>'
-        + log_said()
-        + f'<p class="closing">{_esc(STOPPED)}</p>'
-    )
+def _failed_body(session: Session, state: PageState, frame: Frame = PLAIN) -> str:
+    """A stop. A set-up project's own press that stopped answers with its
+    result line; a setup that stopped says so on the card, and whether it
+    came before any change or part way through one, which is what the
+    outcome carries."""
+    if state.missed:
+        return _added_body(session, state, frame)
+    partial = state.outcome == report.PARTIAL
+    notes = "".join(
+        f"<p>{_esc(note)}</p>" for note in _engine_notes(state, log=True))
+    return _card(
+        session, frame, head=_setup_word(session),
+        said=SETUP_PARTIAL if partial else SETUP_FAILED, details=notes,
+        after=_closing(state, frame, CLOSED if partial else CLOSED_RETRY))
 
 
 BODIES = {
@@ -1678,9 +2453,9 @@ BODIES = {
     CONFLICT: _conflict_body,
     ALREADY: _already_body,
     FAILED: _failed_body,
-    SKILLED: _skilled_body,
-    CONNECTED: _connected_body,
-    CONNECT_FAILED: _connect_failed_body,
+    SKILLED: _added_body,
+    CONNECTED: _added_body,
+    CONNECT_FAILED: _added_body,
 }
 
 

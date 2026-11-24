@@ -552,13 +552,23 @@ def test_two_seed_paths_that_are_one_file_refuse_rather_than_write_twice(project
 
 def test_a_held_claude_file_reads_as_held_on_the_guided_page_and_on_adopt(project):
     (project / CLAUDE).write_bytes(b"@AGENTS.md\n\nOur own notes.\n")
+    plan = mnt.mount_plan(project)
+    held = next(d for d in plan.dispositions() if d.path == CLAUDE)
+    assert (held.verb, held.code) == (mnt.CURRENT, mnt.HOST_HOLDS)
+    # The guided page (PLAN-0027 phase 2): Details lists the held file as
+    # already there before the press, and the press's line doesn't list
+    # it among the files it changed.
+    session = setup_web.Session(project, "scope", mnt.DEFAULT_OWNER)
+    state = setup_web.PageState(
+        setup_web.REVIEW, report.NOOP, False, dispositions=plan.dispositions())
+    drawn = setup_web._file_items(session, state, (), setup_web._Offer())
+    assert (f"<li><code>{CLAUDE}</code> {setup_web.MIDDOT} "
+            f"{setup_web.FILE_ALREADY}</li>") in drawn
     result = mnt.mount(project, today=MOUNT_DAY)
-    rows = {label: (verb, reason)
-            for verb, label, reason in setup_web._families(result.dispositions())}
-    held = mnt.Disposition(CLAUDE, mnt.CURRENT, mnt.HOST_HOLDS)
-    assert rows[CLAUDE] == (mnt.CURRENT, mnt.reason_text(held))
+    changed = setup_web._changed(result.dispositions())
     touched = sum(1 for d in result.dispositions() if d.verb != mnt.CURRENT)
-    assert f"{touched} path(s)" in setup_web._plan_table(result.dispositions(), "Wrote")
+    assert len(changed) == touched
+    assert CLAUDE not in {path for path, _ in changed}
 
     (project / mnt.MANIFEST_REL).unlink()
     plan = ad.adopt_plan(project)

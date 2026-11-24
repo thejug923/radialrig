@@ -556,11 +556,11 @@ REASONS: dict[str, str] = {
     SKILL_RECORD_WRITTEN: "",
     SKILL_RECORD_DROPPED: "the last skill this package installed is gone",
 
-    CONNECT_CREATED: "this client had no settings file here; it now holds one entry",
+    CONNECT_CREATED: "this client had no settings file here; it now holds this project's two entries",
     CONNECT_MERGED: "added {detail}; no other byte changed",
     CONNECT_MERGED_RESERIALIZED:
         "added {detail}; the file was re-serialized at indent 2",
-    CONNECT_CURRENT: "this entry is already registered; no byte changed",
+    CONNECT_CURRENT: "this project's entries are already registered; no byte changed",
     CONNECT_ENTRY_STALE:
         "this key holds an earlier radialrig entry; nothing was written",
     CONNECT_KEY_HOST_OWNED:

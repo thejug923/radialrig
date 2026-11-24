@@ -8,8 +8,9 @@
    2. A close beacon. Leaving the page tells the local server to stop, so
       a walkthrough abandoned before the mount does not leave it running.
       The server also stops on a terminal state and on Ctrl-C.
-   3. "Tick all" beside each group of skill boxes, which ticks that
-      group's boxes and nothing else; the form posts what is ticked.
+   3. "Add all" at the head of a column of the skill grid on Add a
+      project, which ticks that agent's boxes and nothing else; the form
+      posts what is ticked. Details follows the boxes.
 
    A page whose root carries a render id posts that id back with the
    close, so a server that stands rather than ends can tell a reload's
@@ -48,27 +49,6 @@
     })(buttons[i]);
   }
 
-  /* "Tick all" beside a group of skill boxes (PLAN-0015 phase 3). The
-     button ticks every box in its own group that can be ticked and
-     nothing in another group; the page posts the boxes exactly as it
-     would had they been ticked one by one, which is what a page with no
-     script still does. A button standing outside any group has nothing
-     to tick and is removed, the way a Copy button with no clipboard is. */
-  var ticks = document.querySelectorAll("button.tick");
-  for (var t = 0; t < ticks.length; t++) {
-    (function (button) {
-      var group = button.closest("fieldset");
-      if (!group) {
-        button.remove();
-        return;
-      }
-      button.addEventListener("click", function () {
-        var boxes = group.querySelectorAll("input[type=checkbox]:not(:disabled)");
-        for (var b = 0; b < boxes.length; b++) { boxes[b].checked = true; }
-      });
-    })(ticks[t]);
-  }
-
   /* The desktop shell's folder picker, asked for from the page. The
      Browse button ships hidden: only that shell can open a folder, and
      it reveals the button itself once the page has loaded inside its
@@ -96,6 +76,89 @@
     var follow = function () { press.disabled = field.value.trim() === ""; };
     field.addEventListener("input", follow);
     follow();
+  }
+
+  /* On Projects the field sits in Add a project's Details, closed until
+     it is opened. The shell's menu can open the picker with it closed,
+     and the path it writes would land out of sight, so a path arriving
+     opens the Details that holds the field (PLAN-0027 phase 5 review P1).
+     A typed path arrives with it open already. */
+  if (field && field.closest) {
+    var holder = field.closest("details");
+    if (holder) {
+      field.addEventListener("input", function () { holder.open = true; });
+    }
+  }
+
+  /* Add a project (PLAN-0027 phase 2). What Details lists follows the
+     boxes: a skill's files and its command stand while its box is
+     ticked, and the connection's while its box is. The server draws
+     each line as the last post left the boxes and this keeps them in
+     step from there; with no script they stay as drawn, and Refresh
+     redraws them. A line names its boxes in `data-for`, by the key a
+     box carries in `data-shows`. */
+  var boxes = document.querySelectorAll("input[data-shows]");
+  var followers = document.querySelectorAll("[data-for]");
+  var followBoxes = function () {
+    var on = {};
+    for (var b = 0; b < boxes.length; b++) {
+      if (boxes[b].checked) { on[boxes[b].getAttribute("data-shows")] = true; }
+    }
+    for (var d = 0; d < followers.length; d++) {
+      var keys = (followers[d].getAttribute("data-for") || "").split(" ");
+      var shown = false;
+      for (var k = 0; k < keys.length; k++) { if (on[keys[k]]) { shown = true; } }
+      followers[d].hidden = !shown;
+    }
+  };
+  if (boxes.length) {
+    for (var x = 0; x < boxes.length; x++) {
+      boxes[x].addEventListener("change", followBoxes);
+    }
+    /* A reload can bring a box back ticked. */
+    followBoxes();
+  }
+
+  /* "Add all" at the head of a column of the grid ticks that agent's
+     boxes and nothing else, and writes nothing: the screen's one press
+     posts what is ticked. It ships hidden, since only this can wire it. */
+  var alls = document.querySelectorAll("button[data-all]");
+  for (var a = 0; a < alls.length; a++) {
+    (function (button) {
+      button.hidden = false;
+      button.addEventListener("click", function () {
+        var agent = button.getAttribute("data-all");
+        for (var b = 0; b < boxes.length; b++) {
+          if (boxes[b].getAttribute("data-agent") === agent && !boxes[b].disabled) {
+            boxes[b].checked = true;
+          }
+        }
+        followBoxes();
+      });
+    })(alls[a]);
+  }
+
+  /* Refresh, in Details, redraws the screen for a changed name. Details
+     and its Show commands box come back as they were left, once, so the
+     reader sees what the press was for. */
+  var settings = document.querySelector("details.settings");
+  var refresh = document.querySelector("button.refresh");
+  if (settings && refresh) {
+    var commands = settings.querySelector(".show-commands");
+    try {
+      var kept = window.sessionStorage.getItem("radialrig.details");
+      window.sessionStorage.removeItem("radialrig.details");
+      if (kept) {
+        settings.open = true;
+        if (commands && kept === "commands") { commands.checked = true; }
+      }
+    } catch (err) { /* no storage: Details opens closed, as drawn */ }
+    refresh.addEventListener("click", function () {
+      try {
+        window.sessionStorage.setItem(
+          "radialrig.details", commands && commands.checked ? "commands" : "open");
+      } catch (err) { /* as above */ }
+    });
   }
 
   if (terminal || !token) { return; }
