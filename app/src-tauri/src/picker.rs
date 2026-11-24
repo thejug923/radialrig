@@ -81,10 +81,14 @@ if(b){{b.hidden=false;}}}})()"
     )
 }
 
-/// The menu, with the one item D11 allows, labelled from the strings file.
+/// The menu item's label, from the strings file.
+pub fn menu_label() -> &'static str {
+    strings::words().picker_menu_label.as_str()
+}
+
+/// The menu, with the one item D11 allows, labeled from the strings file.
 pub fn menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
-    let label = strings::words().picker_menu_label.as_str();
-    let item = MenuItem::with_id(app, MENU_ITEM, label, true, None::<&str>)?;
+    let item = MenuItem::with_id(app, MENU_ITEM, menu_label(), true, None::<&str>)?;
     Menu::with_items(app, &[&item])
 }
 
@@ -130,20 +134,43 @@ pub fn renamed(window: &WebviewWindow, name: &str) {
         .ok()
         .and_then(|mut held| held.take())
         .unwrap_or_default();
-    let words = strings::words();
-    let said = strings::fill(&words.fail_picker_no_target, &path);
     window
         .app_handle()
         .dialog()
-        .message(said)
-        .title(words.window_title.clone())
+        .message(no_target_notice(&path))
+        .title(strings::words().window_title.clone())
         .kind(MessageDialogKind::Warning)
         .show(|_| {});
+}
+
+/// The stop said when the picked path finds no field on this screen,
+/// with the path in its slot for the person to copy.
+pub fn no_target_notice(path: &str) -> String {
+    strings::fill(&strings::words().fail_picker_no_target, path)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The two things the picker says, in the strings file's own words
+    // (wording.md, section 4; PLAN-0027 phase 4): the menu item, and the
+    // stop when the screen has no folder field to write the path into.
+    #[test]
+    fn the_menu_item_and_the_no_field_notice_say_the_strings_files_words() {
+        assert_eq!(menu_label(), "Choose a folder");
+        assert_eq!(
+            no_target_notice("C:\\Users\\a\\pit-wall"),
+            "This screen doesn't have a project folder field. \
+             Folder you chose: C:\\Users\\a\\pit-wall"
+        );
+        // A picker that answered with nothing leaves the slot empty, and
+        // the sentence still ends cleanly.
+        assert_eq!(
+            no_target_notice(""),
+            "This screen doesn't have a project folder field. Folder you chose:"
+        );
+    }
 
     /// The path back out of the script, read the way the page reads it.
     fn embedded(script: &str) -> String {

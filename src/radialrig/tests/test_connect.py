@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import ast
 import datetime as dt
+import itertools
 import json
 import os
 import pathlib
@@ -38,6 +39,7 @@ from radialrig import roster as ro
 from radialrig import setup_web
 from radialrig.tests.test_mount import (  # noqa: F401 - helpers, by name
     MOUNT_DAY,
+    _make_project,
     tree,
 )
 
@@ -261,6 +263,92 @@ def test_a_flipped_settings_file_edited_elsewhere_keeps_its_crs(project, env, co
     assert mnt.CONNECT_EXCISED_REGION in {d.code for d in plan.dispositions}
     assert config.read_bytes() == CONFIG_HOSTS["indent2"].replace(
         b"\n", b"\r\n").replace(b'"command": "x"', b'"command": "y"', 1)
+
+
+SHARED_STARTS = {
+    "empty-servers": CONFIG_HOSTS["empty-servers"],
+    "one-line": b'{"mcpServers": {}}\n',
+    "no-servers": CONFIG_HOSTS["no-servers"],
+    "crlf": b'{\r\n  "mcpServers": {}\r\n}\r\n',
+}
+
+
+@pytest.mark.parametrize("order", [
+    order for n in (2, 3) for order in itertools.permutations(range(n))
+], ids=lambda order: "-".join(str(i + 1) for i in order))
+@pytest.mark.parametrize("start", sorted(SHARED_STARTS))
+def test_projects_sharing_one_settings_file_disconnect_in_any_order(
+    tmp_path, env, command, start, order,
+):
+    # BUG-0027: projects connected in turn to a file with no other
+    # server, then disconnected. Each later connect lands ahead of the
+    # earlier ones, ending in a comma; cutting out an earlier project's
+    # entries left that comma before the closing brace, and the file
+    # stopped parsing. Every disconnect, in every order, must leave a
+    # file that parses and holds exactly the entries still connected,
+    # and must cut its own entries out rather than rewrite the file.
+    config = roaming_config(env)
+    config.write_bytes(SHARED_STARTS[start])
+    projects = [_make_project(tmp_path / f"p{i + 1}") for i in range(len(order))]
+    keys = {}
+    for project in projects:
+        keys[project] = set(cn.connect(project, env=env, today=CONNECT_DAY).entries)
+
+    still = list(projects)
+    for i in order:
+        plan = cn.unconnect(projects[i], env=env)
+        still.remove(projects[i])
+        cut = {
+            (mnt.RESTORED, mnt.CONNECT_RESTORED),
+            (mnt.EXCISED, mnt.CONNECT_EXCISED_REGION),
+        }
+        if start == "no-servers":
+            # The first connect creates the object and later ones land
+            # inside it, splitting its region, so an earlier project's
+            # disconnect rewrites the file. That keeps it valid and is
+            # not BUG-0027; the note records it.
+            cut.add((mnt.LEFT, mnt.CONNECT_RESERIALIZED))
+        assert marks(plan)[config.as_posix()] in cut
+        loaded = json.loads(config.read_text(encoding="utf-8"))
+        # The object a connect created goes with the last of its entries.
+        assert set(loaded.get("mcpServers", {})) == set().union(
+            *(keys[p] for p in still))
+        assert {k: v for k, v in loaded.items() if k != "mcpServers"} == {
+            k: v for k, v in json.loads(SHARED_STARTS[start]).items()
+            if k != "mcpServers"
+        }
+    if start != "no-servers" or list(order) == sorted(order, reverse=True):
+        # Once every project has gone, the file is back to its bytes from
+        # before the first connect. Last in, first out always was.
+        assert config.read_bytes() == SHARED_STARTS[start]
+
+
+def test_a_copy_of_a_region_elsewhere_in_the_file_is_never_cut(tmp_path, env, command):
+    # Review of BUG-0027's fix: the lookup for a region that lost its
+    # comma must not cut the same text from somewhere else. Here the
+    # active entries were respaced and a copy sits in another object;
+    # the disconnect takes the entries out by name and keeps the copy.
+    config = roaming_config(env)
+    config.write_bytes(CONFIG_HOSTS["empty-servers"])
+    first, second = (_make_project(tmp_path / name) for name in ("p1", "p2"))
+    cn.connect(first, env=env, today=CONNECT_DAY)
+    keys = set(cn.connect(second, env=env, today=CONNECT_DAY).entries)
+    region = cn._record_copies(record_of(second))[0]["insert"]
+    text = config.read_text(encoding="utf-8")
+    assert text.count(region) == 1
+    respaced = region.replace('"command": "', '"command":"')
+    text = text.replace(region, respaced).replace(
+        '{\n  "mcpServers"',
+        '{\n  "backup": {' + region[:-1] + '\n  },\n  "mcpServers"', 1)
+    config.write_text(text, encoding="utf-8")
+    backup = json.loads(text)["backup"]
+
+    plan = cn.unconnect(second, env=env)
+    assert marks(plan)[config.as_posix()] == (mnt.LEFT, mnt.CONNECT_RESERIALIZED)
+    loaded = json.loads(config.read_text(encoding="utf-8"))
+    assert loaded["backup"] == backup
+    assert not keys & set(loaded["mcpServers"])
+    assert len(loaded["mcpServers"]) == 2
 
 
 def test_a_file_without_an_mcp_servers_key_gets_the_object_inserted(
@@ -943,8 +1031,9 @@ def test_the_client_name_and_label_live_only_in_the_client_table():
         and id(node) not in documents
         and (client.name in node.value or client.label in node.value)
     ]
-    # The three fields of the one table row, and nothing else anywhere.
-    assert sorted(naming) == sorted([client.name, client.label, client.restart])
+    # The four fields of the one table row, and nothing else anywhere.
+    assert sorted(naming) == sorted(
+        [client.name, client.label, client.restart, client.reach])
     for module in (report, setup_web):
         rendered = Path(module.__file__).read_text(encoding="utf-8")
         assert client.name not in rendered
@@ -1148,3 +1237,138 @@ def test_a_failed_removal_leaves_both_copies_and_the_record_as_found(
     assert "Permission denied" in str(caught.value)
     assert (visible.read_bytes(), hidden.read_bytes(), record.read_bytes()) == before
     assert cn.is_connected(project)
+
+
+# --- BUG-0018: an open client can undo the change ----------------------
+# Claude Desktop keeps the settings it loaded and can write them back over
+# a change made while it runs. While it runs it holds a lock file beside
+# its settings file, so the kit looks there, not at program names: Claude
+# Code's own program carries the same file name. The owner chose a
+# warning, not a refusal (2026-09-27), so every run still writes and every
+# exit code stands; only the last line changes.
+
+def plant_lock(config: Path) -> Path:
+    """What a running client leaves beside its settings file."""
+    lock = config.parent / "lockfile"
+    lock.write_bytes(b"")
+    return lock
+
+
+def test_a_lock_file_beside_a_settings_file_reads_as_running(tmp_path):
+    client = cn.client_for(CLIENT)
+    config = tmp_path / "Claude" / "claude_desktop_config.json"
+    config.parent.mkdir()
+    assert not cn.is_running(client, [config])
+    plant_lock(config)
+    assert cn.is_running(client, [config])
+    assert not cn.is_running(client, []), "no settings file changes, so no warning"
+
+
+def test_an_open_client_gets_a_warning_on_every_run_that_changes_its_settings(
+    project, env, command, capsys,
+):
+    client = cn.client_for(CLIENT)
+    config = roaming_config(env)
+    config.write_bytes(CONFIG_HOSTS["indent2"])
+    pristine = config.read_bytes()
+    plant_lock(config)
+    ahead = report.client_running_before(client)
+
+    code, out, _ = run(capsys, "connect", CLIENT, str(project), "--dry-run")
+    assert code == report.OK
+    assert out.splitlines()[-3:-1] == [report.DRY_RUN_TAIL, ahead]
+    assert config.read_bytes() == pristine
+
+    code, out, _ = run(capsys, "connect", CLIENT, str(project))
+    assert code == report.OK, "a warning, not a refusal"
+    keys = tuple(record_of(project)["entries"])
+    assert set(keys) <= set(servers(config))
+    assert out.splitlines()[-2] == report.connect_running_after(client)
+    assert client.restart not in out
+
+    code, out, _ = run(capsys, "connect", CLIENT, str(project))
+    assert code == report.NOOP
+    assert ahead not in out
+    assert report.connect_running_after(client) not in out
+
+    code, out, _ = run(capsys, "unconnect", CLIENT, str(project), "--dry-run")
+    assert code == report.OK
+    assert out.splitlines()[-3:-1] == [report.DRY_RUN_TAIL, ahead]
+
+    code, out, _ = run(capsys, "unconnect", CLIENT, str(project))
+    assert code == report.OK
+    assert config.read_bytes() == pristine
+    assert out.splitlines()[-2] == report.unconnect_running_after(client, keys)
+    assert client.restart not in out
+
+
+def test_the_same_connect_again_recovers_an_undo(project, env, command, capsys):
+    config = roaming_config(env)
+    config.write_bytes(CONFIG_HOSTS["indent2"])
+    pristine = config.read_bytes()
+    lock = plant_lock(config)
+    argv = ("connect", CLIENT, str(project), "--scope", "beta")
+    assert run(capsys, *argv)[0] == report.OK
+
+    # The open client writes its old settings back, then the reader quits it.
+    config.write_bytes(pristine)
+    lock.unlink()
+    assert run(capsys, *argv)[0] == report.OK
+    assert set(record_of(project)["entries"]) <= set(servers(config))
+
+
+def test_the_unconnect_warning_names_every_entry_an_undo_puts_back(
+    project, env, command, capsys,
+):
+    client = cn.client_for(CLIENT)
+    config = roaming_config(env)
+    config.write_bytes(CONFIG_HOSTS["indent2"])
+    assert run(capsys, "connect", CLIENT, str(project))[0] == report.OK
+    keys = tuple(record_of(project)["entries"])
+    connected = config.read_bytes()
+    lock = plant_lock(config)
+    code, out, _ = run(capsys, "unconnect", CLIENT, str(project))
+    assert code == report.OK
+    sentence = out.splitlines()[-2]
+
+    # The open client writes its old settings back, then the reader quits it.
+    config.write_bytes(connected)
+    lock.unlink()
+    # Why the sentence does not say to run it again: the record went with
+    # the first run, so a second one has nothing to reverse.
+    assert run(capsys, "unconnect", CLIENT, str(project))[0] == report.NOOP
+    back = tuple(key for key in servers(config) if key.startswith(client.key_prefix))
+    assert set(back) == set(keys)
+    assert sentence == report.unconnect_running_after(client, keys)
+
+
+def test_an_unconnect_that_changes_no_settings_file_keeps_the_restart_line(
+    project, env, command, capsys,
+):
+    client = cn.client_for(CLIENT)
+    config = roaming_config(env)
+    config.write_bytes(CONFIG_HOSTS["indent2"])
+    pristine = config.read_bytes()
+    assert run(capsys, "connect", CLIENT, str(project))[0] == report.OK
+    config.write_bytes(pristine)      # the entries are already gone
+    plant_lock(config)
+
+    _, out, _ = run(capsys, "unconnect", CLIENT, str(project))
+    assert client.restart in out
+    assert report.client_running_before(client) not in out
+    assert "is running" not in out
+
+
+def test_the_running_warnings_carry_no_banned_vocabulary():
+    from radialrig.tests.test_cli import FORBIDDEN_WORD
+
+    client = cn.client_for(CLIENT)
+    key = f"{client.key_prefix}alpha"
+    for text in (
+        report.client_running_before(client),
+        report.connect_running_after(client),
+        report.unconnect_running_after(client, (key, key + cn.WRITE_KEY_SUFFIX)),
+        report.orphan_running_after(client),
+    ):
+        assert not FORBIDDEN_WORD.search(text), text
+        assert client.label in text, text

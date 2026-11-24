@@ -636,8 +636,8 @@ def test_the_readme_upgrading_section_names_the_skills_half_and_both_presses():
     assert "skill" in section.lower()
     assert "already has" in section
     assert "never adds a skill" in section
-    assert f'"{manage_web.UPDATE_LABEL}"' in section
-    assert f'"{manage_web.UPDATE_ALL_LABEL}"' in section
+    assert f'"{manage_web.UPDATE_BUTTON}"' in section
+    assert f'"{manage_web.UPDATE_ALL_BUTTON}"' in section
     assert "upgrade --all" in section
     # An edited skill is left for review, like an edited seeded file.
     assert "edited skill" in section

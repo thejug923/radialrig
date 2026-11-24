@@ -136,31 +136,31 @@ SKILL_CATALOG: tuple[SkillEntry, ...] = (
     SkillEntry(
         name="session-handoff",
         version="3.4.0",
-        summary="End of session sweep, a handoff file, and a kickoff prompt.",
+        summary="Writes a handoff file and a start prompt for the next session.",
         files=("SKILL.md", "scripts/handoff.py"),
     ),
     SkillEntry(
         name="plan-review",
         version="3.0.0",
-        summary="Reviews a plan as a plan: files its absences, never fills them.",
+        summary="Checks a plan for missing pieces and stops after two rounds.",
         files=("SKILL.md",),
     ),
     SkillEntry(
         name="promotion-gate",
         version="3.1.0",
-        summary="A trunk push is a promotion: verified, then approved, each time.",
+        summary="Requires checks and your approval before pushing to the main branch.",
         files=("SKILL.md",),
     ),
     SkillEntry(
         name="toolkit-standards",
         version="4.0.0",
-        summary="When a project's own tool is missing: say so and let the person choose.",
+        summary="Asks before installing or replacing a missing project tool.",
         files=("SKILL.md",),
     ),
     SkillEntry(
         name="memory-keeper",
         version="1.0.0",
-        summary="Routes each memory note to its home and keeps the store worth reading.",
+        summary="Decides where agent memory notes belong and tidies them when asked.",
         files=("SKILL.md", "scripts/audit.py"),
     ),
 )

@@ -304,6 +304,8 @@ def test_the_page_press_writes_the_same_entry(tmp_path, env, client_here,
                                               command):
     project = _make_project(tmp_path / "pressed")
     session = setup_web.Session(project, SCOPE, mnt.DEFAULT_OWNER)
+    # A reader who ticked the connect box, which starts unticked (issue #62).
+    session.connect = True
     listed = [str(project.resolve())]
 
     # The page's own dry run: every GET state writes nothing.

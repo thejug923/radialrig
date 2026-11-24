@@ -101,6 +101,16 @@ command = "radialrig-write"
 args = []
 ```
 
+Claude Desktop keeps its own copy. If you connected it, its settings
+file, `claude_desktop_config.json`, holds `radialrig-<project>` and
+`radialrig-<project>-write`, and every Claude Desktop session gets both,
+chat and the Code tab included. To turn the editor off there, quit Claude
+Desktop fully, delete the `-write` entry, and open it again. On Windows
+the file is in `%APPDATA%\Claude`. The Microsoft Store version keeps its
+copy under `%LOCALAPPDATA%\Packages`, in the Claude package's
+`LocalCache\Roaming\Claude` folder. Connect registers the project in
+every copy it finds, so delete the entry from each one.
+
 If `radialrig-write` isn't on your PATH, register its full path instead.
 It's in the folder `uv tool dir --bin` prints.
 
@@ -179,9 +189,9 @@ never adds a skill, never puts back one whose files were removed, and
 never writes a file you edited. An edited skill is listed with its diff, like
 an edited seed file. `radialrig upgrade --all` does this for every
 mounted project in the list whose folder still exists, with one report
-each. On the manage page it's one press: "Update this project" on a
-project's page, or "Update all projects" on the list. Each button shows
-only when there's something to update.
+each. On the manage page it's one press: "Update" beside a project's
+status, or "Update all" above the list. Each button shows only when
+there's something to update.
 
 The seed is filled in with the scope, owner and mount date from the
 record, never today's date, so an upgrade never changes a

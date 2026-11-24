@@ -1,16 +1,17 @@
-/* The desktop shell window — PLAN-0008 phase 5 bootstrap screen.
-   Tokens are the locked brand values, copied from
-   src/radialrig/data/web/page.css and never re-derived. Dark is the
-   primary treatment; the light alternate is keyed to
-   prefers-color-scheme and swaps in the light-surface mark and the
-   light-context amber anchor.
+/* The desktop app's install screen — PLAN-0008 phase 5, redrawn in the
+   look PLAN-0027 gives the engine's pages (src/radialrig/data/web/
+   page.css): the masthead bar, one card in the middle of the window, a
+   status as a mark and a word, and Details. Tokens are the locked brand
+   values, copied from page.css and never re-derived. Dark is the primary
+   treatment; the light alternate is keyed to prefers-color-scheme and
+   swaps in the light-surface mark and the light-context amber anchor.
 
-   The amber says one thing per screen. On the gate it is the press that
-   agrees. While the run is going it is the step in flight. On a stop a
-   second press can move it is the press forward, and on a stop no press
-   can move it is the segment the run stopped on — because there is no
-   press there to carry it. The focus ring is the one other place the
-   accent appears, and it carries no meaning of its own. */
+   The amber says one thing per screen: the next thing to do. On the
+   Ready card it is the press that agrees. While the run is going it is
+   the step in flight. On a stop a second press can move it is the press
+   forward, and a stop no press can move has none, because there is
+   nothing to press. The focus ring is the one other place the accent
+   appears, and it carries no meaning of its own. */
 
 @font-face {
   font-family: "RadialRig Space Grotesk";
@@ -28,6 +29,7 @@
   --ink: #f7f8fc;
   --muted: #aeb5c1;
   --faint: #8b93a5;
+  --chip: #2a3140;
   --chip-ink: #d5d9e1;
   --choice: #202634;
   --accent: #f8bd5c;
@@ -48,10 +50,13 @@
     --ink: #111318;
     --muted: #343944;
     --faint: #626a78;
+    --chip: #d5d9e1;
     --chip-ink: #343944;
     --choice: #eef0f5;
     --accent: #a95d00;
     --accent-strong: #f0a32d;
+    /* Rig White on Amber 700, not Rig Black: the light anchor is dark
+       enough that ink on it would fall under 4.5:1 at chip size. */
     --on-accent: #f7f8fc;
     --mark-dark: none;
     --mark-light: block;
@@ -61,241 +66,265 @@
 
 * { box-sizing: border-box; }
 
-html, body {
-  margin: 0;
-  height: 100%;
-}
+html { background: var(--ground); }
+html, body { margin: 0; height: 100%; }
 
 body {
+  display: flex;
+  flex-direction: column;
   background: var(--ground);
   color: var(--ink);
   cursor: default;
-  display: flex;
-  flex-direction: column;
   font-family: "RadialRig Space Grotesk", "Segoe UI", system-ui, sans-serif;
-  font-size: 16px;
+  font-size: 15px;
   font-weight: 500;
-  line-height: 1.5;
+  line-height: 1.45;
   user-select: none;
 }
 
-/* The window's one column. It takes the height rather than asking for a
-   percentage of it, so the panels stay centered in a window of any
-   height without the chain of percentages that resolves to nothing when
-   one link in it is missing. */
-main {
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  min-height: 0;
-  padding: 18px 24px 16px;
-}
+h1, p, dl, dd, ol { margin: 0; }
+[hidden] { display: none !important; }
 
 /* --- the masthead ------------------------------------------------------ */
 
+/* One line: the mark, then the name and the endorsement reading on from
+   it as one phrase, the endorsement in small faint type.
+   The bar runs the full width of the window, 46 pixels and its rule, as
+   on the engine's pages. On a window wider than their 70rem column the
+   mark lines up with that column's edge, as there and in the mockups,
+   rather than with the window's (PLAN-0027 phase 5). */
 .masthead {
-  align-items: center;
-  border-bottom: 1px solid var(--line);
+  flex: none;
   display: flex;
-  flex: none;
-  gap: 10px;
-  margin-bottom: 16px;
-  padding-bottom: 12px;
+  align-items: center;
+  height: 47px;
+  padding: 0 max(28px, calc((100% - 70rem) / 2 + 28px));
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+  overflow: hidden;
 }
-
-.mark {
-  flex: none;
-  width: 26px;
-}
-
+.mark { flex: none; width: 28px; margin-right: 9px; }
 .mark img { display: block; height: auto; width: 100%; }
 .mark .dark { display: var(--mark-dark); }
 .mark .light { display: var(--mark-light); }
-
-h1 {
-  font-size: 1rem;
-  font-weight: 500;
-  letter-spacing: 0.01em;
-  margin: 0;
-}
-
-.endorsement {
+.masthead .name { font-size: 1.1rem; letter-spacing: -0.035em; }
+.masthead .endorse {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   color: var(--faint);
   font-size: 0.76rem;
-  letter-spacing: 0.06em;
-  margin: 0 0 0 auto;
-  text-transform: uppercase;
 }
 
 /* --- the stage every state renders into -------------------------------- */
 
+/* The rest of the window, with the one card in its middle. */
 .stage {
+  flex: 1 0 auto;
   display: flex;
-  flex: 1;
   flex-direction: column;
-  min-height: 0;
-}
-
-.center {
   align-items: center;
-  display: flex;
-  flex: 1;
   justify-content: center;
+  padding: 14px 28px 34px;
 }
-
-h2 {
-  font-size: 1.2rem;
-  font-weight: 500;
-  margin: 0 0 0.5rem;
-}
-
-p {
-  color: var(--muted);
-  font-size: 0.92rem;
-  margin: 0 0 0.6rem;
-}
-
-[hidden] { display: none !important; }
 
 /* The debug build's standing notice. Quiet by design: it names a build,
    not a change to this machine, and it is never in a release. */
 .notice {
-  background: var(--sunken);
-  border: 1px solid var(--hair);
-  border-radius: 3px;
-  color: var(--muted);
-  flex: none;
-  font-size: 0.85rem;
+  width: min(100%, 38rem);
   margin: 0 0 12px;
-  padding: 0.6rem 0.75rem;
-  user-select: text;
-  word-break: break-all;
-}
-
-/* --- the consent gate --------------------------------------------------- */
-
-/* One short centered panel: plain words and paths, no command-level
-   detail. It sits centered in the window like the status panel. */
-.gate {
+  padding: 6px 12px;
   background: var(--panel);
   border: 1px solid var(--line);
-  border-radius: 4px;
-  box-shadow: var(--shadow);
-  max-width: 100%;
-  width: 36rem;
+  border-radius: 5px;
+  color: var(--muted);
+  font-size: 14px;
+  user-select: text;
+  overflow-wrap: anywhere;
 }
 
-.gate-main { padding: 20px 24px 18px; }
-.gate-main .friendly { font-size: 0.95rem; margin-bottom: 1rem; }
-.gate-main .reassure { font-size: 0.92rem; margin: 1rem 0 0; }
+/* --- the card ---------------------------------------------------------- */
+
+.card {
+  width: min(100%, 38rem);
+  padding: 26px 30px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  box-shadow: var(--shadow);
+}
+.card > * + * { margin-top: 12px; }
+.card h1 {
+  font-size: 28px;
+  font-weight: 500;
+  line-height: 1.15;
+  letter-spacing: -0.045em;
+  overflow-wrap: anywhere;
+}
+.card > p { color: var(--muted); }
 
 /* Where it lands: paths, never commands. */
 .lands {
+  padding: 5px 13px;
   background: var(--sunken);
-  border: 1px solid var(--hair);
-  border-radius: 3px;
-  padding: 0.6rem 0.75rem;
+  border-radius: 4px;
 }
-
-.lands-row { align-items: baseline; display: flex; gap: 12px; }
-.lands-row + .lands-row { margin-top: 0.35rem; }
-
-.lands-label {
-  color: var(--faint);
-  flex: none;
-  font-size: 0.72rem;
-  letter-spacing: 0.09em;
-  text-transform: uppercase;
-  width: 7.5rem;
+.lands-row {
+  display: grid;
+  grid-template-columns: 112px 1fr;
+  align-items: baseline;
+  padding: 6px 0;
 }
-
+.lands-row + .lands-row { border-top: 1px solid var(--line); }
+.lands-row dt { color: var(--muted); font-size: 13px; }
 .lands-row code {
   color: var(--chip-ink);
-  font-family: "Cascadia Mono", ui-monospace, Consolas, monospace;
-  font-size: 0.82rem;
+  font: 13px/1.55 "Cascadia Mono", ui-monospace, Consolas, monospace;
+  overflow-wrap: anywhere;
   user-select: text;
 }
 
-/* The foot: one plain line and the one press. */
-.gate-foot {
-  align-items: center;
-  border-top: 1px solid var(--line);
+/* A stop's status: a mark and a word, told apart by shape and never by
+   color. */
+.stopped-row {
   display: flex;
-  gap: 20px;
-  padding: 12px 24px 14px;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 14px;
 }
-
-.gate-foot p { flex: 1; font-size: 0.85rem; margin: 0; }
-
-/* --- running and stopped: one centered panel ---------------------------- */
-
-.status {
-  background: var(--panel);
-  border: 1px solid var(--line);
+.symbol {
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border: 1px solid currentColor;
   border-radius: 4px;
-  box-shadow: var(--shadow);
-  max-width: 100%;
-  padding: 20px 24px 22px;
-  width: 30rem;
+  font: 600 12px/1 "Segoe UI Symbol", "Segoe UI", system-ui, sans-serif;
 }
 
-.status .step-label {
+/* The four steps: what is done, the step in flight, and what is still
+   to come. */
+.progress {
+  display: grid;
+  grid-template-columns: 1fr 1.5fr 1fr 1fr;
+  gap: 5px;
+  padding: 0;
+  list-style: none;
+}
+.card > .progress { margin-top: 18px; }
+.progress li {
+  padding-top: 8px;
+  border-top: 4px solid var(--line);
   color: var(--faint);
-  font-size: 0.72rem;
-  letter-spacing: 0.09em;
-  margin: 0 0 10px;
-  text-transform: uppercase;
+  font-size: 13px;
 }
+.progress li.done { border-color: var(--muted); color: var(--muted); }
+/* Running: the step in flight is the screen's one amber element. */
+.progress li.current { border-color: var(--accent); color: var(--ink); }
 
-.steps-track { display: flex; gap: 4px; margin-bottom: 14px; }
-.steps-track span { background: var(--hair); border-radius: 2px; flex: 1; height: 4px; }
-.steps-track .done { background: var(--muted); }
-/* Running: the active segment is the screen's one amber element. */
-.steps-track .active { background: var(--accent-strong); }
-/* A stop: the segment stays neutral where a retry press carries the
-   amber, and takes it where no press exists. */
-.steps-track .stopped { background: var(--chip-ink); }
-.steps-track .stopped-final { background: var(--accent-strong); }
+/* --- Details ----------------------------------------------------------- */
 
-.status .saying { color: var(--ink); font-size: 0.95rem; margin: 0; }
-.status .detail { color: var(--muted); font-size: 0.92rem; margin: 0.35rem 0 0; user-select: text; }
-.status .actions { margin-top: 16px; }
+.details > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 24px;
+  color: var(--muted);
+  font-size: 13px;
+  list-style: none;
+  cursor: pointer;
+}
+.details > summary::-webkit-details-marker { display: none; }
+.details > summary:hover {
+  color: var(--ink);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.details > summary::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  margin: 0 3px 0 1px;
+  border: solid currentColor;
+  border-width: 1px 1px 0 0;
+  transform: rotate(45deg);
+}
+.details[open] > summary::before { transform: rotate(135deg); }
+.drawer {
+  margin: 5px 0;
+  padding: 10px 14px;
+  background: var(--sunken);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  color: var(--muted);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+.drawer p + p { margin-top: 5px; }
+
+/* Where a value the shell sends can land: what to do next, everything
+   behind Details, and the debug notice. Each draws its spaces and line
+   breaks as they came, so a folder named with two spaces in a row, or
+   an error over several lines, reads as it is (PLAN-0027 phase 4
+   review). */
+#saying, .drawer p, .notice { white-space: pre-wrap; }
 
 /* --- the presses -------------------------------------------------------- */
 
+/* The press, under a rule at the foot of the card. */
+.action-zone {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+.card > .action-zone { margin-top: 18px; }
+.press-note { color: var(--muted); font-size: 13px; }
+
 button {
-  background: var(--choice);
-  border: 1px solid var(--line);
-  border-radius: 3px;
-  color: var(--ink);
-  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 34px;
+  padding: 6px 16px;
   font: inherit;
-  font-size: 0.92rem;
-  padding: 9px 22px;
+  font-size: 14px;
+  line-height: 1.2;
   white-space: nowrap;
+  color: var(--ink);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  cursor: pointer;
 }
 
-/* The one amber element on the gate: the press that agrees. */
+/* The one amber element on the Ready card: the press that agrees. */
 #consent {
-  background: var(--accent-strong);
-  border-color: var(--accent-strong);
-  color: #111318;
+  color: var(--on-accent);
+  background: var(--accent);
+  border-color: var(--accent);
 }
 
 /* The one amber element on a stop a second press can move. */
 #retry {
-  background: var(--accent-strong);
-  border-color: var(--accent-strong);
-  color: #111318;
-}
-
-/* Hover swaps the fill to the accent anchor, which is darker in light
-   than the resting Amber 500, so the ink swaps with it. The same rule
-   the engine's own page gives its primary press. */
-#consent:hover, #retry:hover {
+  color: var(--on-accent);
   background: var(--accent);
   border-color: var(--accent);
+}
+
+/* Hover keeps the fill and draws the ink round it, the rule the engine's
+   own pages give their primary press. */
+#consent:hover, #retry:hover {
   color: var(--on-accent);
+  background: var(--accent);
+  border-color: var(--ink);
 }
 
 /* The accent's one other appearance, and the only one that says nothing:

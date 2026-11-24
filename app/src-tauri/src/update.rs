@@ -32,9 +32,9 @@
 //!   module then closes the engine's page the same way and restarts the
 //!   app on the new file.
 //!
-//! The app is never closed while an engine step runs. A press of Run This
-//! Step Again can start a pass while the dialog is open or the download
-//! runs, so before anything closes this module takes the flag a pass takes
+//! The app is never closed while an engine step runs. A press of Try
+//! again can start a pass while the dialog is open or the download runs,
+//! so before anything closes this module takes the flag a pass takes
 //! when it starts (`Shell::hold`): it waits out a running pass, and while
 //! it holds the flag no new pass starts. Nor does an update end the process
 //! while a window close is giving the engine its five seconds: it takes
@@ -42,7 +42,8 @@
 //! has it.
 //!
 //! A failure says so in a dialog of its own: the update was not installed,
-//! nothing changed, and why, in plain words. All of it runs in Rust. The
+//! that nothing changed when it failed before anything was written or
+//! closed, and why, in plain words. All of it runs in Rust. The
 //! window's capability grants none of the updater's commands (Decided 9,
 //! Invariant 6), and a plugin called from Rust passes no capability check:
 //! `UpdaterExt` reads the plugin's managed state directly
@@ -334,7 +335,9 @@ fn end_engine_page(app: &AppHandle) {
 /// The failure, said in a dialog of its own. When the hook had already
 /// closed the engine's page and hidden the window, the installer never
 /// started, so this is still the version it was: the app opens again,
-/// which brings its engine's page back, and nothing has changed.
+/// which brings its engine's page back. The installer the plugin wrote
+/// out stays in its temporary folder, so this failure's sentence doesn't
+/// say nothing changed.
 fn failed(app: &AppHandle, cause: Cause, reopen: bool) {
     let words = strings::words();
     app.dialog()
@@ -532,16 +535,57 @@ mod tests {
     }
 
     // The dialog names the version on offer and the one running, and says
-    // what updating does, in the strings file's own words.
+    // what updating does, in the strings file's own words (wording.md,
+    // section 4). Its two presses are labeled from the same file.
     #[test]
     fn the_dialog_names_the_new_version_and_this_one() {
         let said = ready_sentence("0.1.19", "0.1.18");
-        assert!(
-            said.starts_with("RadialRig 0.1.19 is ready. This is RadialRig 0.1.18.\n"),
-            "{said}"
+        assert_eq!(
+            said,
+            "RadialRig 0.1.19 is available. You have 0.1.18.\n\
+             Updating closes RadialRig, installs the new version, and reopens it."
         );
-        assert!(said.ends_with("closes RadialRig, installs the new version and opens it again."));
-        assert!(!said.contains('{'), "{said}");
+        let words = strings::words();
+        assert_eq!(words.update_now, "Update now");
+        assert_eq!(words.update_later, "Later");
+    }
+
+    // The one sentence a failed update ends on, for each cause: that it
+    // wasn't installed, then why, in plain words and with no machine error
+    // quoted. The three that stop before anything is written or closed
+    // say nothing changed: the download is held in memory and checked
+    // there, and the version check comes before the hold. The install's
+    // does not: by its failure the plugin has written the installer to a
+    // temporary folder, and on Windows the hook has closed the engine's
+    // page and hidden the window (PLAN-0027 phase 4 review R3).
+    #[test]
+    fn each_failed_update_says_why_and_only_a_failure_before_any_change_says_nothing_changed() {
+        let unchanged = "The update wasn't installed, and nothing changed.\n";
+        let said = [
+            (
+                Cause::Download,
+                "The download didn't finish. Check your internet connection or try again later.",
+            ),
+            (
+                Cause::Signature,
+                "The download failed its signature check, so RadialRig didn't run it.",
+            ),
+            (
+                Cause::Version,
+                "The download was signed for a different version than expected, \
+                 so RadialRig didn't run it.",
+            ),
+        ];
+        for (cause, why) in said {
+            assert_eq!(failure_sentence(cause), format!("{unchanged}{why}"), "{cause:?}");
+        }
+        let install = failure_sentence(Cause::Install);
+        assert_eq!(
+            install,
+            "The update wasn't installed.\n\
+             The download passed its check, but RadialRig couldn't install it."
+        );
+        assert!(!install.contains("nothing changed"), "{install}");
     }
 
     // Why an update was not installed: a download that did not arrive, a
@@ -564,10 +608,7 @@ mod tests {
 
         let said = [Cause::Download, Cause::Signature, Cause::Install].map(failure_sentence);
         for sentence in &said {
-            assert!(
-                sentence.starts_with("The update was not installed, and nothing changed.\n"),
-                "{sentence}"
-            );
+            assert!(sentence.starts_with("The update wasn't installed"), "{sentence}");
         }
         assert!(said[0] != said[1] && said[1] != said[2] && said[0] != said[2]);
         assert!(said[1].contains("signature"));
@@ -576,7 +617,7 @@ mod tests {
     // The update holds the flag a pass takes when it starts: it cannot
     // take it while a pass runs, and while it holds it no pass can start.
     // `launch` takes the same flag with one exchange, which is what makes
-    // a press of Run This Step Again wait rather than run under a closing
+    // a press of Try again wait rather than run under a closing
     // app.
     #[test]
     fn the_update_waits_for_a_running_pass_and_no_pass_starts_while_it_holds() {
@@ -683,7 +724,7 @@ mod tests {
     }
 
     // The hold stands before the install, once (PLAN-0021 phase 3 review).
-    // Without it, a pass that Run This Step Again started during the dialog
+    // Without it, a pass that Try again started during the dialog
     // or the download could still be running when the install ends the
     // app, which would cut an engine replacement short. The hold's own test
     // proves it works; this one proves the ask takes it in time.
@@ -799,7 +840,7 @@ mod tests {
         assert!(refusal.contains("return failed(app, Cause::Version, false);"));
 
         let said = failure_sentence(Cause::Version);
-        assert!(said.starts_with("The update was not installed, and nothing changed.\n"));
+        assert!(said.starts_with("The update wasn't installed, and nothing changed.\n"));
         assert!(said.contains("signed for"), "{said}");
     }
 }

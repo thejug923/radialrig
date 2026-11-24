@@ -275,9 +275,21 @@ fn take(kind: u32, value: &str) -> Result<(), ()> {
     Ok(())
 }
 
-/// The one box this flow shows: the outcome line, a blank line, then the
-/// notice that says what this removal did not take. Two whole sentences
-/// out of the strings file, joined; nothing is composed here.
+/// The one box's words: the outcome line, a blank line, then the notice
+/// that says what this removal did not take. Two whole sentences out of
+/// the strings file, joined; nothing is composed here. Only Windows shows
+/// the box, so elsewhere only the tests read it.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn box_text(key: &str, detail: &str, engine: &str) -> String {
+    let words = strings::words();
+    format!(
+        "{}\n\n{}",
+        strings::fill(said(words, key), detail),
+        strings::fill(&words.uninstall_notice, engine)
+    )
+}
+
+/// The one box this flow shows, with the words above.
 #[cfg(windows)]
 fn show(key: &str, detail: &str, engine: &str) {
     use windows::core::PCWSTR;
@@ -286,12 +298,7 @@ fn show(key: &str, detail: &str, engine: &str) {
     };
 
     let words = strings::words();
-    let body = format!(
-        "{}\n\n{}",
-        strings::fill(said(words, key), detail),
-        strings::fill(&words.uninstall_notice, engine)
-    );
-    let body = wide(&body);
+    let body = wide(&box_text(key, detail, engine));
     let title = wide(&words.window_title);
     unsafe {
         MessageBoxW(
@@ -521,5 +528,83 @@ mod tests {
         assert!(words.uninstall_path_kept.contains("{detail}"));
         assert!(words.uninstall_path_write_error.contains("{detail}"));
         assert!(words.uninstall_notice.contains("{detail}"));
+    }
+
+    // The notice under every line, as the box says it (PLAN-0027 phase 4).
+    // It must be true both for someone who followed Remove RadialRig's
+    // steps, where this uninstall is the last one and the engine, uv and
+    // its Python are already gone, and for someone who uninstalled the app
+    // first, where they are all still here. So it says what the uninstall
+    // leaves alone, without saying any of it is still on the computer.
+    const ENGINE: &str = "\"C:\\Users\\reader\\.local\\bin\\radialrig.exe\"";
+    const NOTICE: &str = "This uninstalls the RadialRig desktop app and its own files. \
+        It doesn't remove the engine, uv, the Python uv installed for it, RadialRig's \
+        files in your projects, or your client entries. If you followed the steps in \
+        Remove RadialRig before this, this was the last one. Otherwise, run \
+        \"C:\\Users\\reader\\.local\\bin\\radialrig.exe\" manage and open Remove \
+        RadialRig to remove the rest.";
+
+    #[test]
+    fn the_box_says_each_path_line_and_then_the_notice() {
+        let lines = [
+            (
+                strings::UNINSTALL_PATH_REMOVED,
+                "",
+                "Removed the entry RadialRig added to your user Path. \
+                 The rest of your Path is unchanged.",
+            ),
+            (
+                strings::UNINSTALL_PATH_KEPT,
+                OURS,
+                "Left your user Path unchanged because it was edited after RadialRig \
+                 added its entry. Removing it automatically could overwrite those edits. \
+                 The entry is C:\\Users\\reader\\.local\\bin, under HKCU\\Environment.",
+            ),
+            (
+                strings::UNINSTALL_PATH_GONE,
+                "",
+                "The entry RadialRig added wasn't on your user Path, \
+                 so your Path was left unchanged.",
+            ),
+            (
+                strings::UNINSTALL_PATH_ABSENT,
+                "",
+                "No Path change record was found, so your user Path was left unchanged.",
+            ),
+            (
+                strings::UNINSTALL_PATH_ERROR,
+                "",
+                "Couldn't read your user Path, so it was left unchanged.",
+            ),
+            (
+                strings::UNINSTALL_PATH_WRITE_ERROR,
+                OURS,
+                "Couldn't update your user Path, so it was left unchanged. The entry \
+                 RadialRig added is still there: C:\\Users\\reader\\.local\\bin, \
+                 under HKCU\\Environment.",
+            ),
+        ];
+        for (key, detail, line) in lines {
+            assert_eq!(box_text(key, detail, ENGINE), format!("{line}\n\n{NOTICE}"), "{key}");
+        }
+    }
+
+    // Each outcome the run can reach says its own line over the notice: the
+    // decision's four, and the write that refused.
+    #[test]
+    fn every_outcome_reaches_the_box_with_the_notice_under_it() {
+        let held = record(OURS, &format!("{OURS};C:\\Windows"), EXPANDABLE);
+        let (key, detail, _) = after_take(&held, Err(()));
+        assert!(box_text(key, &detail, ENGINE).starts_with("Couldn't update your user Path"));
+        for outcome in [
+            Removal::NoRecord,
+            Removal::Gone,
+            Removal::Take { kind: EXPANDABLE, value: String::new() },
+            Removal::Refuse,
+        ] {
+            let said = box_text(key_of(&outcome), OURS, ENGINE);
+            assert!(said.ends_with(&format!("\n\n{NOTICE}")), "{outcome:?}");
+            assert!(!said.contains('{'), "{outcome:?}");
+        }
     }
 }

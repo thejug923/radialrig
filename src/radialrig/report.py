@@ -170,6 +170,67 @@ CONNECT_REPAIR_REMEDY = (
 )
 CONNECT_WITHHELD = "The registration is not offered on this page:"
 
+# BUG-0018. An open client can write the settings it loaded back over a
+# change made while it runs, so a run that changes them then says so and
+# names the quit step. A warning, not a refusal, by the owner's choice:
+# the run writes and its exit code stands. Templates, so no constant names
+# a client. No sentence spells a command line: one rebuilt here would
+# drop the options the reader passed and break on a path with a space.
+CLIENT_RUNNING_BEFORE = (
+    "{label} is running. Fully quit it first, or it may undo this change."
+)
+CLIENT_RUNNING_AFTER = (
+    "{label} is running and may undo this change. Fully quit {label}, "
+    "run this {verb} again, then reopen it."
+)
+CLIENT_RUNNING_REMOVED = (
+    "{label} is running and may put back what this removed. Fully quit "
+    "{label}, then remove {keys} from its settings file if they are back."
+)
+CLIENT_RUNNING_HEAD = "{label} is running and may "   # both after-run warnings open so
+
+
+def client_running_before(client) -> str:
+    """For a plan: the client is open, so quit it before the real run."""
+    return CLIENT_RUNNING_BEFORE.format(label=client.label)
+
+
+def connect_running_after(client) -> str:
+    """For a connect that ran while the client was open. The same connect,
+    once the client is closed, writes again what the client undid."""
+    return CLIENT_RUNNING_AFTER.format(label=client.label, verb="connect")
+
+
+def unconnect_running_after(client, keys) -> str:
+    """For a reversal that ran while the client was open.
+
+    Running it again cannot recover an undo: the run removed the record,
+    so a second run answers "not registered" while the client has put the
+    entries back. Removing the named entries from the settings file is
+    the one step that holds for every record, an old one-entry record
+    included.
+    """
+    return CLIENT_RUNNING_REMOVED.format(
+        label=client.label, keys=" and ".join(keys))
+
+
+def orphan_running_after(client) -> str:
+    """For an orphan removal that ran while the client was open. It needs
+    no record, so the same removal recovers an undo."""
+    return CLIENT_RUNNING_AFTER.format(label=client.label, verb="removal")
+
+
+def repair_running_after(client) -> str:
+    """For the manage page's repair, the removal then the registration,
+    run while the client was open. An undo leaves the record mismatched
+    again, which is what the repair is offered for."""
+    return CLIENT_RUNNING_AFTER.format(label=client.label, verb="repair")
+
+
+def is_running_after(line: str, client) -> bool:
+    """Whether a report line is one of the after-run warnings above."""
+    return line.startswith(CLIENT_RUNNING_HEAD.format(label=client.label))
+
 # The refusal codes that say this project already carries a connect
 # record. They are what decides which remedy a refusal names: a project
 # with a record can run the reversal, and a project without one cannot.
@@ -672,6 +733,10 @@ def connect_report(result, *, dry_run: bool = False) -> list[str]:
     lines.append("")
     if dry_run:
         lines.append(DRY_RUN_TAIL)
+        if result.running:
+            lines.append(client_running_before(client))
+    elif result.running:
+        lines.append(connect_running_after(client))
     else:
         lines.append(client.restart)
     return lines
@@ -714,6 +779,10 @@ def unconnect_report(plan, *, dry_run: bool = False) -> list[str]:
     lines.append(CONNECT_CLEAN_TAIL if plan.complete else CONNECT_LEFT_TAIL)
     if dry_run:
         lines.append(DRY_RUN_TAIL)
+        if plan.running:
+            lines.append(client_running_before(plan.client))
+    elif plan.running:
+        lines.append(unconnect_running_after(plan.client, plan.keys or (plan.key,)))
     else:
         lines.append(plan.client.restart)
     return lines
@@ -809,6 +878,10 @@ def orphan_report(plan, *, resolve, dry_run: bool = False) -> list[str]:
     lines.append(ORPHAN_REMOVED_TAIL if plan.complete else ORPHAN_LEFT_TAIL)
     if dry_run:
         lines.append(DRY_RUN_TAIL)
+        if plan.running:
+            lines.append(client_running_before(plan.client))
+    elif plan.running:
+        lines.append(orphan_running_after(plan.client))
     else:
         lines.append(plan.client.restart)
     return lines
